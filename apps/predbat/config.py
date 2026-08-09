@@ -2111,6 +2111,7 @@ INVERTER_DEF = {
     },
     "TESLA": {
         "name": "Tesla Powerwall",
+        "reserve_is_charge_target": True,
         "has_rest_api": False,
         "has_mqtt_api": False,
         "output_charge_control": "none",
