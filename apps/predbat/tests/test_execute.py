@@ -44,6 +44,7 @@ class ActiveTestInverter:
         self.inv_has_charge_enable_time = True
         self.inv_has_timed_pause = True
         self.inv_reserve_is_charge_target = False
+        self.grid_charge_allowed = None
         self.inv_has_discharge_enable_time = True
         self.inv_has_ge_eco_toggle = False
         self.inv_has_ge_inverter_mode = False
@@ -135,6 +136,9 @@ class ActiveTestInverter:
     # Bind the production implementation rather than re-stating it here, so these tests exercise the
     # real hold arithmetic. It only reads soc_percent and inv_reserve_is_charge_target, both set above.
     hold_reserve_percent = Inverter.hold_reserve_percent
+
+    def adjust_grid_charge(self, allow):
+        self.grid_charge_allowed = allow
 
     def adjust_reserve(self, reserve):
         self.reserve_last = reserve
