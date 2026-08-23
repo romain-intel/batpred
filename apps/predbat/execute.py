@@ -809,6 +809,8 @@ class Execute:
             if self.set_read_only:
                 if self.set_read_only_axle:
                     status = RUN_STATE_READ_ONLY + " (Axle)"
+                elif getattr(self, "set_read_only_vpp", False):
+                    status = RUN_STATE_READ_ONLY + " (VPP)"
                 else:
                     status = RUN_STATE_READ_ONLY
                 continue
