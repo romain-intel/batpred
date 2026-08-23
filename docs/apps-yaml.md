@@ -1880,6 +1880,9 @@ These are described in detail in [Energy Rates](energy-rates.md) and are listed 
 - **axle_automatic** - Optional, whether to use the default entity name **binary_sensor.predbat_axle_event** for axle event details (default `true`, use the default entity name)
 - **axle_session** - Optional, enables manual override of the Axle event entity name
 - **axle_control** - Optional, whether to switch Predbat to read-only mode during active Axle VPP events (default: false)
+- **vpp_control** - Optional, whether to switch Predbat to read-only mode during a generic (non-Axle) VPP event (default: false)
+- **vpp_calendar** - Optional, a Home Assistant calendar entity holding your VPP event windows, e.g. `calendar.vpp_events`
+- **vpp_active** - Optional, an entity that reads `on` while a VPP event is running, e.g. a Tesla `grid_services_active` sensor
 - **kraken_provider** - Defines whether you are an EDF or Eon.Next customer
 - **kraken_account_id** - Kraken account id (EDF or Eon.Next customers only)
 - **kraken_export_account_id** - Separate export account id (if required) for Kraken
@@ -2718,3 +2721,27 @@ If you want to set days_previous to take an average of the house load over all t
     - 7
     - 8
 ```
+
+### Generic VPP events (calendar based)
+
+Many demand-response programmes - PG&E's in California via Tesla, among others - announce event windows by email
+and offer no API a home user can poll. **vpp_calendar** covers that case: point it at a Home Assistant calendar
+entity holding the windows, which you can fill in by hand or from whatever automation you already have.
+
+```yaml
+  vpp_control: true
+  vpp_calendar: calendar.vpp_events
+  vpp_active: binary_sensor.my_battery_grid_services_active   # optional
+```
+
+While an event is running Predbat switches to read-only and writes nothing to the inverter, because during a
+dispatch the programme is driving the battery and any command Predbat sends is either overridden or fights it.
+The status shows **Read-Only (VPP)** so it is clear why Predbat has stood down. This is the same stance Predbat
+already takes for Axle events via **axle_control**.
+
+**vpp_active** is for programmes that publish a live "an event is running" flag. It is optional and can be used
+on its own, but it gives no advance notice, so a calendar is what lets you see the next window coming.
+
+Calendar times are read from the entity's `start_time` and `end_time` attributes. Home Assistant writes these as
+naive local time, and Predbat localises them against your configured **timezone** - so make sure that is set
+correctly, or events will be acted on at the wrong hour.
