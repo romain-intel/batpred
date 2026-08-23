@@ -100,6 +100,7 @@ from tests.test_teslemetry import test_teslemetry
 from tests.test_compare import test_compare
 from tests.test_gateway import run_gateway_tests
 from tests.test_axle import test_axle
+from tests.test_vpp import run_vpp_tests
 from tests.test_db_manager import test_db_manager
 from tests.test_hahistory import run_hahistory_tests
 from tests.test_hainterface_state import run_hainterface_state_tests
@@ -621,6 +622,7 @@ def main():
         ("download", test_download, "Predbat download/update comprehensive tests (GitHub API, SHA1, install check, file ops)", False),
         # Axle Energy VPP unit tests
         ("axle", test_axle, "Axle Energy VPP comprehensive tests (init, event fetching, error handling, history, sessions)", False),
+        ("vpp", run_vpp_tests, "Generic VPP event handling tests", False),
         # Database Manager unit tests
         ("db_manager", test_db_manager, "DatabaseManager comprehensive tests (state ops, entities/history, error handling, persistence, commit throttling)", False),
         # HAHistory component tests

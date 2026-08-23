@@ -36,6 +36,7 @@ from const import (
 from predbat_metrics import metrics
 from futurerate import FutureRate
 from axle import fetch_axle_sessions, load_axle_slot, fetch_axle_active
+from vpp import fetch_vpp_event
 
 import copy
 
@@ -2866,6 +2867,17 @@ class Fetch:
                 self.log("Axle VPP event is active - enabling read-only mode")
                 self.set_read_only = True
                 self.set_read_only_axle = True
+
+        # Generic VPP events (calendar and/or a live signal). During a dispatch the programme owns
+        # the battery, so Predbat stands down entirely rather than fighting it - the same stance
+        # taken for Axle above. The event is fetched even when control is off so the plan can still
+        # show it and the next window stays visible.
+        self.vpp_event = fetch_vpp_event(self)
+        self.set_read_only_vpp = False
+        if self.vpp_event["active"] and self.get_arg("vpp_control", False) and not self.set_read_only:
+            self.log("VPP event is active{} - enabling read-only mode".format(" ({})".format(self.vpp_event["message"]) if self.vpp_event["message"] else ""))
+            self.set_read_only = True
+            self.set_read_only_vpp = True
 
         # hard wired options, can be configured per inverter later on
         self.set_soc_enable = True
