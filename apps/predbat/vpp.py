@@ -88,6 +88,11 @@ def _parse_event_time(base, raw):
     return None
 
 
+def entity_id_name(entity_id):
+    """Return an entity id for logging, tolerating a list form."""
+    return entity_id[0] if isinstance(entity_id, list) and entity_id else entity_id
+
+
 def fetch_vpp_event(base):
     """Work out the VPP state right now, from whichever sources are configured.
 
@@ -108,6 +113,7 @@ def fetch_vpp_event(base):
 
     if calendar_entity:
         start, end, message = _event_window(base, calendar_entity)
+        calendar_on = str(base.get_state_wrapper(entity_id=calendar_entity, default="off")).lower() == "on"
         if start and end:
             result["start"] = start
             result["end"] = end
@@ -117,12 +123,14 @@ def fetch_vpp_event(base):
             # event that has started from one that has not
             result["minutes_to_start"] = int((start - now).total_seconds() / 60)
             result["minutes_to_end"] = int((end - now).total_seconds() / 60)
-            if start <= now < end:
-                result["active"] = True
-        # The entity's own state is the calendar's answer to "is an event on", so trust it over the
-        # arithmetic above when the two disagree - an all-day event, for instance, has a window that
-        # does not line up with the state at all
-        if str(base.get_state_wrapper(entity_id=calendar_entity, default="off")).lower() == "on":
+            # The window decides. A calendar entity's state is not a reliable "running now" signal -
+            # depending on the integration it can read "on" for an event that is merely the next one
+            # due, which would stand Predbat down a day early. When we can see the window, believe it.
+            result["active"] = start <= now < end
+            if calendar_on and not result["active"]:
+                base.log("Info: VPP calendar {} reads on but its event runs {} to {} - not treating it as active yet".format(entity_id_name(calendar_entity), start, end))
+        elif calendar_on:
+            # No readable window, so the state is all there is to go on
             result["active"] = True
 
     if active_entity:
