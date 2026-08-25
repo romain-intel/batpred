@@ -920,6 +920,13 @@ CONFIG_ITEMS = [
         "enable_condition": "num_cars > 0",
     },
     {
+        "name": "vpp_battery_priority",
+        "friendly_name": "VPP battery priority over car",
+        "type": "switch",
+        "default": False,
+        "icon": "mdi:transmission-tower-export",
+    },
+    {
         "name": "car_charging_solar_excess",
         "friendly_name": "Car solar charging surplus threshold",
         "type": "input_number",

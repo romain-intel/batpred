@@ -2886,6 +2886,8 @@ class Fetch:
         self.set_export_freeze = self.get_arg("set_export_freeze")
         self.set_charge_freeze = self.get_arg("set_charge_freeze")
         self.set_charge_freeze_only = self.get_arg("set_charge_freeze_only")
+        self.battery_charging_from_grid = self.get_arg("battery_charging_from_grid")
+        self.vpp_battery_priority = self.get_arg("vpp_battery_priority")
         self.set_charge_low_power = self.get_arg("set_charge_low_power")
         self.set_export_low_power = self.get_arg("set_export_low_power")
         self.charge_low_power_margin = self.get_arg("charge_low_power_margin")

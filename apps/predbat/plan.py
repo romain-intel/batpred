@@ -5361,6 +5361,35 @@ class Plan:
             total += surplus * overlap / step
         return total
 
+    def car_solar_vpp_hold_end(self):
+        """
+        Minute up to which a VPP event can claim solar for the battery, or None
+
+        This is only the outer bound of the hold, not the hold itself - whether any given slot is
+        actually held also depends on the battery still having room by then (see the caller). The
+        end of the event is the bound because a dispatch pays for what is in the pack when it runs,
+        so the daylight leading up to it counts as well as the event itself.
+
+        None when the flag is off, no event is known, or the event has already finished, all of which
+        leave the car's normal first call on the surplus untouched.
+
+        Returns:
+        - int: absolute minute the hold can run to, or None for no hold
+        """
+        if not getattr(self, "vpp_battery_priority", False):
+            return None
+        event = getattr(self, "vpp_event", None)
+        if not event:
+            return None
+        minutes_to_end = event.get("minutes_to_end")
+        if minutes_to_end is None:
+            # An active event with no readable window - treat the rest of the plan as in scope rather
+            # than guessing at an end time; the battery-full test below still releases the car early
+            return self.minutes_now + self.forecast_minutes if event.get("active") else None
+        if minutes_to_end <= 0:
+            return None
+        return self.minutes_now + minutes_to_end
+
     def plan_car_charging_solar_windows(self, load_step=None):
         """
         Find the slots where forecast solar is worth diverting to the car
@@ -5375,6 +5404,15 @@ class Plan:
         ready time. Solar is opportunistic: it tops the car up above the guaranteed minimum whenever the
         sun is free, and bounding it by a morning ready time would exclude every daylight hour.
 
+        With vpp_battery_priority on and a VPP event known, solar is held back for the battery until
+        the battery is predicted full, or the event ends, whichever comes first. A dispatch pays for
+        what is in the pack when it runs, so on an event day a kWh is worth more in the battery than
+        in the car - and of the two, only the car can make the shortfall up later from cheap import.
+
+        The hold stops at full rather than running to the end of the event: once the battery cannot
+        take any more, the remaining surplus would be exported at whatever midday pays, which is
+        generally far less than it is worth in the car. Off (the default) the car keeps first call.
+
         Args:
         - load_step: house load forecast, built here when the caller has not already done so
 
@@ -5386,10 +5424,16 @@ class Plan:
         if load_step is None:
             load_step = self.car_solar_load_forecast()
 
+        vpp_hold_end = self.car_solar_vpp_hold_end()
+        # Running estimate of the pack as the held surplus fills it, so the hold can be released the
+        # moment there is no more room rather than lasting the whole event
+        vpp_battery_estimate = self.soc_kw
+
         windows = []
         slot_count = 0
         rejected_sun = 0
         rejected_export = 0
+        rejected_vpp = 0
         start_minute = int(self.minutes_now / self.plan_interval_minutes) * self.plan_interval_minutes
         end_minute = self.minutes_now + self.forecast_minutes
         for minute in range(start_minute, end_minute, self.plan_interval_minutes):
@@ -5398,6 +5442,19 @@ class Plan:
             slot_start = max(minute, self.minutes_now)
             slot_end = minute + self.plan_interval_minutes
             if slot_end <= slot_start:
+                continue
+            # While a VPP event is in scope the battery gets the surplus, but only until it is full -
+            # after that the car is the better home for it, since the alternative is exporting at the
+            # midday rate. The battery estimate is walked forward slot by slot so "full" is judged at
+            # the time of each slot rather than from the SoC right now.
+            if vpp_hold_end is not None and slot_start < vpp_hold_end and vpp_battery_estimate < self.soc_max:
+                to_battery = min(
+                    self.car_solar_surplus_kwh(slot_start, slot_end, load_step),
+                    self.soc_max - vpp_battery_estimate,
+                    self.battery_rate_max_charge * self.battery_rate_max_scaling * (slot_end - slot_start),
+                )
+                vpp_battery_estimate += max(to_battery, 0.0)
+                rejected_vpp += 1
                 continue
             # The threshold is a power, so the slot's energy is converted rather than compared directly:
             # on a 30 minute plan interval 1.25kWh is 2.5kW. Keeping it a power means the setting does
@@ -5419,13 +5476,14 @@ class Plan:
         if slot_count:
             accepted = ", ".join("{}={}kW".format(self.time_abs_str(window["start"]), window["power_kw"]) for window in windows)
             self.log(
-                "Car solar windows: {} of {} slots qualify (need forecast surplus >= {}kW and export rate <= {}), rejected {} for low surplus and {} for export rate{}".format(
+                "Car solar windows: {} of {} slots qualify (need forecast surplus >= {}kW and export rate <= {}), rejected {} for low surplus, {} for export rate and {} held for a VPP event{}".format(
                     len(windows),
                     slot_count,
                     self.car_charging_solar_excess,
                     self.car_charging_rate_threshold_export,
                     rejected_sun,
                     rejected_export,
+                    rejected_vpp,
                     " - accepted: " + accepted if accepted else "",
                 )
             )

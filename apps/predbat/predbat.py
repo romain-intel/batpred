@@ -516,6 +516,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.set_read_only = True
         self.set_read_only_axle = False
         self.set_read_only_vpp = False
+        self.vpp_battery_priority = False
         self.vpp_event = {"active": False, "start": None, "end": None, "message": "", "minutes_to_start": None, "minutes_to_end": None}
         self.set_reserve_enable = False
         self.set_charge_freeze_only = False
