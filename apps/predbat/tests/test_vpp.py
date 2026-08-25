@@ -123,19 +123,40 @@ def test_vpp_calendar_window(my_predbat):
     return failed
 
 
-def test_vpp_calendar_state_wins(my_predbat):
-    """The calendar's own state marks an event active even when the window does not say so.
+def test_vpp_window_beats_calendar_state(my_predbat):
+    """A readable window decides, even when the entity state disagrees.
 
-    An all-day entry has a window that bears no relation to the dispatch hours, so the entity state
-    is the more reliable of the two. Trusting only the arithmetic would silently miss those.
+    Some calendar integrations read "on" for the event that is merely next due, not one running now.
+    Believing that stood Predbat down a full day before a dispatch. When the window is readable it is
+    the better evidence, so it wins; the state is only consulted when there is no window at all.
     """
-    print("  - test_vpp_calendar_state_wins")
+    print("  - test_vpp_window_beats_calendar_state")
     failed = False
     cal = "calendar.vpp"
+
+    # State says on, but the event is tomorrow - must NOT be active
     base = FakeBase(my_predbat, calendar=cal)
-    base.set_calendar(cal, "on", local_str(my_predbat, 120), local_str(my_predbat, 240), "All day")
+    base.set_calendar(cal, "on", local_str(my_predbat, 1440), local_str(my_predbat, 1620), "Tomorrow 5pm")
+    event = fetch_vpp_event(base)
+    if event["active"]:
+        print("ERROR: an event a day out must not be active just because the entity reads on")
+        failed = True
+    if event["minutes_to_start"] is None or abs(event["minutes_to_start"] - 1440) > 2:
+        print("ERROR: the window should still be reported, got {}".format(event["minutes_to_start"]))
+        failed = True
+
+    # State says off but the window contains now - the window still decides
+    base = FakeBase(my_predbat, calendar=cal)
+    base.set_calendar(cal, "off", local_str(my_predbat, -30), local_str(my_predbat, 30), "Running")
     if not fetch_vpp_event(base)["active"]:
-        print("ERROR: calendar state 'on' should mark the event active regardless of the window")
+        print("ERROR: a window containing now should be active even if the entity reads off")
+        failed = True
+
+    # With no readable window the state is all there is, so it is honoured
+    base = FakeBase(my_predbat, calendar=cal)
+    base.set_calendar(cal, "on", None, None, "No window")
+    if not fetch_vpp_event(base)["active"]:
+        print("ERROR: with no window, an entity reading on should be treated as active")
         failed = True
     return failed
 
@@ -233,7 +254,7 @@ def run_vpp_tests(my_predbat):
     print("**** Running VPP event tests ****\n")
     failed = test_vpp_no_config(my_predbat)
     failed |= test_vpp_calendar_window(my_predbat)
-    failed |= test_vpp_calendar_state_wins(my_predbat)
+    failed |= test_vpp_window_beats_calendar_state(my_predbat)
     failed |= test_vpp_live_signal(my_predbat)
     failed |= test_vpp_bad_calendar_data(my_predbat)
     failed |= test_vpp_timezone_handling(my_predbat)
