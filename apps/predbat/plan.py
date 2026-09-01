@@ -5420,6 +5420,11 @@ class Plan:
         The hold stops at full rather than running to the end of the event: once the battery cannot
         take any more, the remaining surplus would be exported at whatever midday pays, which is
         generally far less than it is worth in the car. Off (the default) the car keeps first call.
+        car_charging_solar_battery_soc decides who gets the surplus first. Below that level the battery
+        takes it and no car window is offered; at or above it the car has first call, which is what
+        happens throughout at the default of 0%. It is the mirror of car_charging_plan_min_soc: that one
+        says how much of the car you will pay for, this one says how much house battery you want banked
+        before the car is worth more than the pack.
 
         Args:
         - load_step: house load forecast, built here when the caller has not already done so
@@ -5435,13 +5440,22 @@ class Plan:
         vpp_hold_end = self.car_solar_vpp_hold_end()
         # Running estimate of the pack as the held surplus fills it, so the hold can be released the
         # moment there is no more room rather than lasting the whole event
-        vpp_battery_estimate = self.soc_kw
+        # Shared with the battery-priority gate below: both hold surplus back for the same pack, so a
+        # slot banked by one has to be visible to the other or the second holds again for energy the
+        # first already put in.
+        battery_estimate = self.soc_kw
 
         windows = []
         slot_count = 0
         rejected_sun = 0
         rejected_export = 0
         rejected_vpp = 0
+        rejected_battery = 0
+        # Level the battery has to reach before the car is offered anything, and a running estimate of
+        # the pack as the held surplus fills it. Walking it forward means "full enough" is judged at the
+        # time of each slot rather than from the SoC right now, so a pack that gets there mid-morning
+        # releases the car mid-morning rather than holding all day.
+        battery_priority_kwh = self.soc_max * min(max(self.car_charging_solar_battery_soc, 0), 100) / 100.0
         start_minute = int(self.minutes_now / self.plan_interval_minutes) * self.plan_interval_minutes
         end_minute = self.minutes_now + self.forecast_minutes
         for minute in range(start_minute, end_minute, self.plan_interval_minutes):
@@ -5455,13 +5469,13 @@ class Plan:
             # after that the car is the better home for it, since the alternative is exporting at the
             # midday rate. The battery estimate is walked forward slot by slot so "full" is judged at
             # the time of each slot rather than from the SoC right now.
-            if vpp_hold_end is not None and slot_start < vpp_hold_end and vpp_battery_estimate < self.soc_max:
+            if vpp_hold_end is not None and slot_start < vpp_hold_end and battery_estimate < self.soc_max:
                 to_battery = min(
                     self.car_solar_surplus_kwh(slot_start, slot_end, load_step),
-                    self.soc_max - vpp_battery_estimate,
+                    self.soc_max - battery_estimate,
                     self.battery_rate_max_charge * self.battery_rate_max_scaling * (slot_end - slot_start),
                 )
-                vpp_battery_estimate += max(to_battery, 0.0)
+                battery_estimate += max(to_battery, 0.0)
                 rejected_vpp += 1
                 continue
             # The threshold is a power, so the slot's energy is converted rather than compared directly:
@@ -5469,6 +5483,18 @@ class Plan:
             # not silently change meaning if plan_interval_minutes is not 30, and lets a part slot be
             # judged on the same footing as a whole one.
             surplus_kwh = self.car_solar_surplus_kwh(slot_start, slot_end, load_step)
+            # The battery gets the surplus until it is predicted to reach the configured level. What it
+            # cannot physically take in the slot is not held back - that would strand surplus that the
+            # car could have used and the grid will otherwise buy at the midday rate.
+            if battery_estimate < battery_priority_kwh:
+                to_battery = min(
+                    surplus_kwh,
+                    battery_priority_kwh - battery_estimate,
+                    self.battery_rate_max_charge * self.battery_rate_max_scaling * (slot_end - slot_start),
+                )
+                battery_estimate += max(to_battery, 0.0)
+                rejected_battery += 1
+                continue
             power_kw = surplus_kwh * 60.0 / (slot_end - slot_start)
             if power_kw < self.car_charging_solar_excess:
                 rejected_sun += 1
@@ -5484,7 +5510,7 @@ class Plan:
         if slot_count:
             accepted = ", ".join("{}={}kW".format(self.time_abs_str(window["start"]), window["power_kw"]) for window in windows)
             self.log(
-                "Car solar windows: {} of {} slots qualify (need forecast surplus >= {}kW and export rate <= {}), rejected {} for low surplus, {} for export rate and {} held for a VPP event{}".format(
+                "Car solar windows: {} of {} slots qualify (need forecast surplus >= {}kW and export rate <= {}), rejected {} for low surplus, {} for export rate, {} held for a VPP event and {} held for the battery{}".format(
                     len(windows),
                     slot_count,
                     self.car_charging_solar_excess,
@@ -5492,6 +5518,7 @@ class Plan:
                     rejected_sun,
                     rejected_export,
                     rejected_vpp,
+                    rejected_battery,
                     " - accepted: " + accepted if accepted else "",
                 )
             )

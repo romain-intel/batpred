@@ -479,6 +479,77 @@ def test_vpp_battery_priority_holds_solar(my_predbat):
     return failed
 
 
+def test_solar_battery_priority_level(my_predbat):
+    """car_charging_solar_battery_soc decides who gets the surplus first.
+
+    The mirror of car_charging_plan_min_soc: that one caps what is bought for the car, this one banks
+    house battery before the car is worth more than the pack. At 0 the car keeps first call, which is
+    the behaviour everyone has today.
+    """
+    print("  - test_solar_battery_priority_level")
+    failed = False
+    setup_car(my_predbat, rate=7.0, house_kw=1.0)
+    reset_rates(my_predbat, 30.0, 5.0)
+    my_predbat.car_charging_solar = True
+    # The VPP hold is a separate gate that also holds solar back; clear any event a previous test left
+    # behind so this measures the slider rather than whatever ran before it
+    my_predbat.vpp_battery_priority = False
+    my_predbat.vpp_event = {"active": False, "start": None, "end": None, "message": "", "minutes_to_start": None, "minutes_to_end": None}
+    my_predbat.battery_rate_max_charge = 2.0 / 30.0  # 2kWh per 30 minute slot, pinned for determinism
+    my_predbat.battery_rate_max_scaling = 1.0
+    my_predbat.soc_max = 100.0
+    set_pv(my_predbat, 7.0, start_offset=240, length=240)
+
+    # 0% - unchanged, the car takes everything it can
+    my_predbat.car_charging_solar_battery_soc = 0
+    my_predbat.soc_kw = 0.0
+    baseline = my_predbat.plan_car_charging_solar_windows()
+    if not baseline:
+        print("ERROR: expected solar windows at a 0% battery priority")
+        return True
+
+    # 100% with an empty battery the sun cannot fill: the battery takes the lot
+    my_predbat.car_charging_solar_battery_soc = 100
+    if my_predbat.plan_car_charging_solar_windows():
+        print("ERROR: at 100% priority with an empty battery the car should get nothing")
+        failed = True
+
+    # 100% with a full battery: nothing left to bank, so the car gets it all back
+    my_predbat.soc_kw = my_predbat.soc_max
+    if len(my_predbat.plan_car_charging_solar_windows()) != len(baseline):
+        print("ERROR: a full battery should release every window even at 100% priority")
+        failed = True
+
+    # A level already met releases the car; one still short holds it. Same battery, same sun - only
+    # the threshold moves, which is the whole point of the control.
+    my_predbat.soc_kw = 50.0
+    my_predbat.car_charging_solar_battery_soc = 40
+    met = my_predbat.plan_car_charging_solar_windows()
+    my_predbat.car_charging_solar_battery_soc = 60
+    short = my_predbat.plan_car_charging_solar_windows()
+    if len(met) != len(baseline):
+        print("ERROR: a battery already above the level should behave as if priority were off, got {} vs {}".format(len(met), len(baseline)))
+        failed = True
+    if len(short) >= len(met):
+        print("ERROR: a higher level should hold back more, got short={} met={}".format(len(short), len(met)))
+        failed = True
+
+    # Out-of-range values are clamped rather than producing a nonsense threshold
+    my_predbat.soc_kw = my_predbat.soc_max
+    my_predbat.car_charging_solar_battery_soc = 150
+    if len(my_predbat.plan_car_charging_solar_windows()) != len(baseline):
+        print("ERROR: a level above 100% should clamp, not hold a full battery back")
+        failed = True
+    my_predbat.soc_kw = 0.0
+    my_predbat.car_charging_solar_battery_soc = -10
+    if len(my_predbat.plan_car_charging_solar_windows()) != len(baseline):
+        print("ERROR: a negative level should clamp to 0 and leave the car first in line")
+        failed = True
+
+    my_predbat.car_charging_solar_battery_soc = 0
+    return failed
+
+
 def test_solar_windows_ignore_ready_time(my_predbat):
     """Solar windows run to the forecast horizon, so a morning ready time does not exclude daylight."""
     print("  - test_solar_windows_ignore_ready_time")
@@ -624,6 +695,7 @@ def run_car_solar_tests(my_predbat):
         "soc_max",
         "vpp_event",
         "car_charging_solar_excess",
+        "car_charging_solar_battery_soc",
         "car_charging_rate_threshold_export",
         "car_charging_plan_min_soc",
         "car_charging_from_battery",
@@ -641,6 +713,7 @@ def run_car_solar_tests(my_predbat):
         failed |= test_solar_slot_size_follows_surplus(my_predbat)
         failed |= test_solar_slot_capped_by_charger(my_predbat)
         failed |= test_vpp_battery_priority_holds_solar(my_predbat)
+        failed |= test_solar_battery_priority_level(my_predbat)
         if failed:
             return failed
         failed |= test_car_export_tradeoff(my_predbat)
