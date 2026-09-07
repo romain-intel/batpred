@@ -932,6 +932,13 @@ CONFIG_ITEMS = [
         "enable": "car_charging_solar",
     },
     {
+        "name": "vpp_battery_priority",
+        "friendly_name": "VPP battery priority over car",
+        "type": "switch",
+        "default": False,
+        "icon": "mdi:transmission-tower-export",
+    },
+    {
         "name": "car_charging_solar_battery_soc",
         "friendly_name": "Car solar battery priority level",
         "type": "input_number",

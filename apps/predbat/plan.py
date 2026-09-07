@@ -5423,6 +5423,35 @@ class Plan:
             total += surplus * overlap / step
         return total
 
+    def car_solar_vpp_hold_end(self):
+        """
+        Minute up to which a VPP event can claim solar for the battery, or None
+
+        This is only the outer bound of the hold, not the hold itself - whether any given slot is
+        actually held also depends on the battery still having room by then (see the caller). The end
+        of the event is the bound because a dispatch pays for what is in the pack when it runs, so the
+        daylight leading up to it counts as well as the event itself.
+
+        None when the flag is off, no event is known, or the event has already finished, all of which
+        leave the car's normal first call on the surplus untouched.
+
+        Returns:
+        - int: absolute minute the hold can run to, or None for no hold
+        """
+        if not getattr(self, "vpp_battery_priority", False):
+            return None
+        event = getattr(self, "vpp_event", None)
+        if not event:
+            return None
+        minutes_to_end = event.get("minutes_to_end")
+        if minutes_to_end is None:
+            # An active event with no readable window - treat the rest of the plan as in scope rather
+            # than guessing at an end time; the battery-full test below still releases the car early
+            return self.minutes_now + self.forecast_minutes if event.get("active") else None
+        if minutes_to_end <= 0:
+            return None
+        return self.minutes_now + minutes_to_end
+
     def car_solar_reserved_for_car(self, load_step, car_n=0):
         """
         Surplus the car needs from the slots it will actually be present for, in kWh
@@ -5497,10 +5526,14 @@ class Plan:
         rejected_sun = 0
         rejected_export = 0
         rejected_battery = 0
+        rejected_vpp = 0
         # Level the battery has to reach before the car is offered anything, and a running estimate of
         # the pack as the held surplus fills it. Walking it forward means "full enough" is judged at the
         # time of each slot rather than from the SoC right now, so a pack that gets there mid-morning
         # releases the car mid-morning rather than holding all day.
+        # A VPP dispatch pays for what is in the pack when it runs, so it claims surplus up to a full
+        # battery rather than only up to the everyday priority level below.
+        vpp_hold_end = self.car_solar_vpp_hold_end()
         # Surplus the car can only get from the slots it will be present for. The hold below gives up
         # exactly this much, so away time moves the car's charge earlier instead of removing it: the
         # battery still has the rest of the day, the car does not.
@@ -5525,6 +5558,15 @@ class Plan:
             # The battery gets the surplus until it is predicted to reach the configured level. What it
             # cannot physically take in the slot is not held back - that would strand surplus that the
             # car could have used and the grid will otherwise buy at the midday rate.
+            if vpp_hold_end is not None and slot_start < vpp_hold_end and battery_estimate < self.soc_max:
+                to_battery = min(
+                    surplus_kwh,
+                    self.soc_max - battery_estimate,
+                    self.battery_rate_max_charge * self.battery_rate_max_scaling * (slot_end - slot_start),
+                )
+                battery_estimate += max(to_battery, 0.0)
+                rejected_vpp += 1
+                continue
             if battery_estimate < battery_priority_kwh and given_to_car >= reserved_for_car:
                 to_battery = min(
                     surplus_kwh,
@@ -5551,13 +5593,14 @@ class Plan:
         if slot_count:
             accepted = ", ".join("{}={}kW".format(self.time_abs_str(window["start"]), window["power_kw"]) for window in windows)
             self.log(
-                "Car solar windows: {} of {} slots qualify (need forecast surplus >= {}kW and export rate <= {}), rejected {} for low surplus, {} for export rate and {} held for the battery{}".format(
+                "Car solar windows: {} of {} slots qualify (need forecast surplus >= {}kW and export rate <= {}), rejected {} for low surplus, {} for export rate, {} held for a VPP event and {} held for the battery{}".format(
                     len(windows),
                     slot_count,
                     self.car_charging_solar_excess,
                     self.car_charging_rate_threshold_export,
                     rejected_sun,
                     rejected_export,
+                    rejected_vpp,
                     rejected_battery,
                     " - accepted: " + accepted if accepted else "",
                 )
