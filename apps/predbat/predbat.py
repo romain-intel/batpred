@@ -566,6 +566,7 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         self.car_charging_limit_model = None
         self.car_charging_soc = [0]
         self.car_charging_solar_battery_soc = 0
+        self.vpp_battery_priority = False
         self.car_charging_soc_next = [None]
         self.car_charging_rate = [7.4]
         # Per-car cap on car_charging_rate from car_charging_max_rate (0 = no cap), see car_max_rate_cap()
