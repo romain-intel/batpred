@@ -79,6 +79,10 @@ def setup_car(my_predbat, car_kwh=8.0, ready_ahead=720, rate=7.4, house_kw=0.0):
     my_predbat.car_charging_solar_excess = 1.0
     my_predbat.car_charging_rate_threshold_export = 99
     my_predbat.car_charging_plan_min_soc = 100
+    # A full house battery: surplus goes to the pack first, and these tests are about how the car's share is
+    # sized rather than who gets it. The ones about the hold set the battery themselves.
+    my_predbat.soc_max = 10.0
+    my_predbat.soc_kw = 10.0
 
 
 def set_pv(my_predbat, midday_kw, start_offset=240, length=240):
@@ -400,93 +404,87 @@ def set_vpp_event(my_predbat, minutes_to_end, active=True):
 
 
 def test_vpp_battery_priority_holds_solar(my_predbat):
-    """With the flag on, solar before the end of a VPP event goes to the battery, not the car.
+    """With the flag on, the run-up to a VPP event fills the battery even ahead of the car's own claims.
 
-    The point is the daylight *leading up to* a dispatch, not just the dispatch itself - a battery
-    that only starts filling when the event starts is already too late to be paid for it.
+    Spare sun already goes to the house battery first. What the flag adds is precedence over the car's
+    claims on that sun - a deadline, or away time later in the day - until the event ends, because a
+    dispatch pays for what is in the pack when it runs and a battery that only starts filling at the event
+    is too late to be paid. The car's deadline is still a guarantee: what it loses to the event is bought.
     """
     print("  - test_vpp_battery_priority_holds_solar")
     failed = False
-    setup_car(my_predbat, rate=7.0, house_kw=1.0)
+    setup_car(my_predbat, car_kwh=40.0, rate=7.0, house_kw=1.0)
     reset_rates(my_predbat, 30.0, 5.0)
     my_predbat.car_charging_solar = True
-    # Sun from +4h to +8h; the event ends at +6h, so the first half is held and the rest is free
-    set_pv(my_predbat, 7.0, start_offset=240, length=240)
-
-    # Flag off: the car keeps first call, which is the existing behaviour
-    my_predbat.vpp_battery_priority = False
-    set_vpp_event(my_predbat, minutes_to_end=360)
-    baseline = my_predbat.plan_car_charging_solar_windows()
-    if not baseline:
-        print("ERROR: expected solar windows with the flag off")
-        return True
-
-    # Flag on with an empty battery that the sun cannot fill before the event: everything is held.
-    # The charge rate is pinned rather than inherited: how fast the held surplus fills the pack is
-    # what decides when the car is released, and earlier tests leave whatever rate they last set.
-    my_predbat.vpp_battery_priority = True
-    my_predbat.battery_rate_max_charge = 2.0 / 30.0  # 2kWh per 30 minute slot
+    my_predbat.car_charging_soc = [10.0]
+    my_predbat.battery_rate_max_charge = 2.0 / 30.0  # 2kWh per 30 minute slot, pinned for determinism
     my_predbat.battery_rate_max_scaling = 1.0
-    my_predbat.soc_max = 100.0
+    my_predbat.soc_max = 10.0
     my_predbat.soc_kw = 0.0
-    held = my_predbat.plan_car_charging_solar_windows()
-    if len(held) >= len(baseline):
-        print("ERROR: the flag should remove windows, got {} vs baseline {}".format(len(held), len(baseline)))
-        failed = True
-    for window in held:
-        if (window["start"] - my_predbat.minutes_now) < 360:
-            print("ERROR: window at +{} min starts before the event ends at +360".format(window["start"] - my_predbat.minutes_now))
+    # Eight sunny slots of 3kWh surplus from +4h; the car is promised 60% (30kWh, so 20kWh more) by +8h
+    set_pv(my_predbat, 7.0, start_offset=240, length=240)
+    deadline = int((my_predbat.minutes_now + 480) / my_predbat.plan_interval_minutes) * my_predbat.plan_interval_minutes
+    my_predbat.manual_car_deadline_keep = {minute: 60 for minute in range(deadline, deadline + my_predbat.plan_interval_minutes)}
+    set_vpp_event(my_predbat, minutes_to_end=360)
+
+    def offset(windows):
+        return [window["start"] - my_predbat.minutes_now for window in windows]
+
+    try:
+        # Flag off: the deadline's claim wins, so the car takes the sun from the first sunny slot
+        my_predbat.vpp_battery_priority = False
+        claimed = my_predbat.plan_car_charging_solar_windows()
+        if not claimed or offset(claimed)[0] != 240:
+            print("ERROR: with the flag off the deadline should claim the sun from +240, got {}".format(offset(claimed)))
             failed = True
-    if not held:
-        print("ERROR: sun after the event ends should still be offered to the car")
-        failed = True
 
-    # The hold is not blanket: a battery that is already full has no room, so the car gets the surplus
-    # back even inside the event window - exporting it at the midday rate is the worse outcome
-    my_predbat.soc_kw = my_predbat.soc_max
-    full = my_predbat.plan_car_charging_solar_windows()
-    if len(full) != len(baseline):
-        print("ERROR: a full battery should release every window, got {} vs baseline {}".format(len(full), len(baseline)))
-        failed = True
+        # Flag on: nothing before the event ends goes to the car, and the claim resumes after it
+        my_predbat.vpp_battery_priority = True
+        held = my_predbat.plan_car_charging_solar_windows()
+        if any(start < 360 for start in offset(held)):
+            print("ERROR: with the flag on no window may start before the event ends at +360, got {}".format(offset(held)))
+            failed = True
+        if not held:
+            print("ERROR: the car's claim should resume once the event has ended")
+            failed = True
 
-    # A battery with one slot's worth of room fills on the first held slot and releases the rest
-    my_predbat.soc_kw = my_predbat.soc_max - 1.0
-    partial = my_predbat.plan_car_charging_solar_windows()
-    if not (len(held) < len(partial) <= len(baseline)):
-        print("ERROR: expected held({}) < partial({}) <= baseline({})".format(len(held), len(partial), len(baseline)))
-        failed = True
+        # A battery with no room has nothing to take, so the flag holds nothing back
+        my_predbat.soc_kw = my_predbat.soc_max
+        if offset(my_predbat.plan_car_charging_solar_windows())[:1] != [240]:
+            print("ERROR: a full battery should leave the car its sun from +240 even with the flag on")
+            failed = True
+        my_predbat.soc_kw = 0.0
 
-    my_predbat.soc_kw = 0.0
+        # A finished event, or none at all, leaves the flag inert
+        set_vpp_event(my_predbat, minutes_to_end=-30, active=False)
+        if offset(my_predbat.plan_car_charging_solar_windows()) != offset(claimed):
+            print("ERROR: a past event must not change anything")
+            failed = True
+        my_predbat.vpp_event = {"active": False, "start": None, "end": None, "message": "", "minutes_to_start": None, "minutes_to_end": None}
+        if offset(my_predbat.plan_car_charging_solar_windows()) != offset(claimed):
+            print("ERROR: with no VPP event the flag must be inert")
+            failed = True
 
-    # A finished event releases the hold entirely
-    set_vpp_event(my_predbat, minutes_to_end=-30, active=False)
-    if len(my_predbat.plan_car_charging_solar_windows()) != len(baseline):
-        print("ERROR: a past event must not hold anything back")
-        failed = True
-
-    # No event at all, flag still on, changes nothing
-    my_predbat.vpp_event = {"active": False, "start": None, "end": None, "message": "", "minutes_to_start": None, "minutes_to_end": None}
-    if len(my_predbat.plan_car_charging_solar_windows()) != len(baseline):
-        print("ERROR: with no VPP event the flag must be inert")
-        failed = True
-
-    # An active event with no readable window holds everything rather than guessing
-    set_vpp_event(my_predbat, minutes_to_end=None, active=True)
-    if my_predbat.plan_car_charging_solar_windows():
-        print("ERROR: an active event with no window should hold all solar back")
-        failed = True
-
+        # An active event with no readable window holds everything rather than guessing, while the pack has room
+        my_predbat.soc_max = 100.0
+        set_vpp_event(my_predbat, minutes_to_end=None, active=True)
+        if my_predbat.plan_car_charging_solar_windows():
+            print("ERROR: an active event with no window should hold all solar back")
+            failed = True
+    finally:
+        my_predbat.manual_car_deadline_keep = {}
+        my_predbat.vpp_battery_priority = False
     return failed
 
 
-def test_solar_battery_priority_level(my_predbat):
-    """car_charging_solar_battery_soc decides who gets the surplus first.
+def test_solar_battery_takes_surplus_first(my_predbat):
+    """The house battery gets surplus solar first; the car is offered windows once it is predicted full.
 
-    The mirror of car_charging_plan_min_soc: that one caps what is bought for the car, this one banks
-    house battery before the car is worth more than the pack. At 0 the car keeps first call, which is
-    the behaviour everyone has today.
+    A kWh in the pack displaces the evening peak, while one in a car with nothing promised displaces at most
+    a cheap overnight top-up. The fullness is walked forward slot by slot as the held surplus fills the pack,
+    so a battery that gets there mid-morning releases the car mid-morning rather than holding all day.
     """
-    print("  - test_solar_battery_priority_level")
+    print("  - test_solar_battery_takes_surplus_first")
     failed = False
     setup_car(my_predbat, rate=7.0, house_kw=1.0)
     reset_rates(my_predbat, 30.0, 5.0)
@@ -497,56 +495,32 @@ def test_solar_battery_priority_level(my_predbat):
     my_predbat.vpp_event = {"active": False, "start": None, "end": None, "message": "", "minutes_to_start": None, "minutes_to_end": None}
     my_predbat.battery_rate_max_charge = 2.0 / 30.0  # 2kWh per 30 minute slot, pinned for determinism
     my_predbat.battery_rate_max_scaling = 1.0
-    my_predbat.soc_max = 100.0
+    my_predbat.soc_max = 10.0
     set_pv(my_predbat, 7.0, start_offset=240, length=240)
 
-    # 0% - unchanged, the car takes everything it can
-    my_predbat.car_charging_solar_battery_soc = 0
-    my_predbat.soc_kw = 0.0
-    baseline = my_predbat.plan_car_charging_solar_windows()
-    if not baseline:
-        print("ERROR: expected solar windows at a 0% battery priority")
+    # Full battery: nothing to bank, so every sunny slot goes to the car
+    my_predbat.soc_kw = 10.0
+    full = my_predbat.plan_car_charging_solar_windows()
+    if len(full) != 8:
+        print("ERROR: a full battery should release all 8 sunny slots, got {}".format(len(full)))
         return True
 
-    # 100% with an empty battery the sun cannot fill: the battery takes the lot
-    my_predbat.car_charging_solar_battery_soc = 100
-    if my_predbat.plan_car_charging_solar_windows():
-        print("ERROR: at 100% priority with an empty battery the car should get nothing")
-        failed = True
-
-    # 100% with a full battery: nothing left to bank, so the car gets it all back
-    my_predbat.soc_kw = my_predbat.soc_max
-    if len(my_predbat.plan_car_charging_solar_windows()) != len(baseline):
-        print("ERROR: a full battery should release every window even at 100% priority")
-        failed = True
-
-    # A level already met releases the car; one still short holds it. Same battery, same sun - only
-    # the threshold moves, which is the whole point of the control.
-    my_predbat.soc_kw = 50.0
-    my_predbat.car_charging_solar_battery_soc = 40
-    met = my_predbat.plan_car_charging_solar_windows()
-    my_predbat.car_charging_solar_battery_soc = 60
-    short = my_predbat.plan_car_charging_solar_windows()
-    if len(met) != len(baseline):
-        print("ERROR: a battery already above the level should behave as if priority were off, got {} vs {}".format(len(met), len(baseline)))
-        failed = True
-    if len(short) >= len(met):
-        print("ERROR: a higher level should hold back more, got short={} met={}".format(len(short), len(met)))
-        failed = True
-
-    # Out-of-range values are clamped rather than producing a nonsense threshold
-    my_predbat.soc_kw = my_predbat.soc_max
-    my_predbat.car_charging_solar_battery_soc = 150
-    if len(my_predbat.plan_car_charging_solar_windows()) != len(baseline):
-        print("ERROR: a level above 100% should clamp, not hold a full battery back")
-        failed = True
+    # Empty battery at 2kWh a slot: the first 5 sunny slots fill it, the last 3 go to the car
     my_predbat.soc_kw = 0.0
-    my_predbat.car_charging_solar_battery_soc = -10
-    if len(my_predbat.plan_car_charging_solar_windows()) != len(baseline):
-        print("ERROR: a negative level should clamp to 0 and leave the car first in line")
+    empty = my_predbat.plan_car_charging_solar_windows()
+    if len(empty) != 3:
+        print("ERROR: an empty 10kWh pack filling at 2kWh a slot should hold 5 of 8 slots, leaving 3, got {}".format(len(empty)))
+        failed = True
+    if empty and empty[0]["start"] != full[5]["start"]:
+        print("ERROR: the car should be released once the pack is full, from the sixth sunny slot, got {}".format(empty[0]["start"]))
         failed = True
 
-    my_predbat.car_charging_solar_battery_soc = 0
+    # Half full: fewer slots held
+    my_predbat.soc_kw = 5.0
+    half = my_predbat.plan_car_charging_solar_windows()
+    if len(half) != 5:
+        print("ERROR: a half-full pack should hold 3 slots, leaving 5, got {}".format(len(half)))
+        failed = True
     return failed
 
 
@@ -554,8 +528,8 @@ def test_away_moves_solar_earlier(my_predbat):
     """Away time makes the battery-priority hold yield, so the car charges while it is still here.
 
     The hold assumes the car can catch up later, which stops being true the moment the afternoon is
-    marked away - and at a 100% priority level the car would otherwise never see a solar window at
-    all. Reported from a live system: marking the afternoon away made the car charge from the grid
+    marked away - and with the battery taking surplus first the car would otherwise never see a solar
+    window at all. Reported from a live system: marking the afternoon away made the car charge from the grid
     at 30p instead of moving to the morning sun.
     """
     print("  - test_away_moves_solar_earlier")
@@ -567,7 +541,6 @@ def test_away_moves_solar_earlier(my_predbat):
     my_predbat.soc_kw = 0.0
     my_predbat.battery_rate_max_charge = 10.0 / 60.0
     my_predbat.battery_rate_max_scaling = 1.0
-    my_predbat.car_charging_solar_battery_soc = 100
     set_pv(my_predbat, 8.0, start_offset=120, length=480)
     low_rates = [{"start": my_predbat.minutes_now + 30 * n, "end": my_predbat.minutes_now + 30 * (n + 1), "average": 30.0} for n in range(40)]
     update_rates_import(my_predbat, low_rates)
@@ -604,7 +577,6 @@ def test_away_moves_solar_earlier(my_predbat):
         print("ERROR: nothing should be reserved for the car when no away time is set")
         failed = True
 
-    my_predbat.car_charging_solar_battery_soc = 0
     return failed
 
 
@@ -795,7 +767,7 @@ def run_car_solar_tests(my_predbat):
         "manual_car_away_times",
         "vpp_event",
         "vpp_battery_priority",
-        "car_charging_solar_battery_soc",
+        "manual_car_deadline_keep",
         "battery_rate_max_charge",
         "battery_rate_max_scaling",
         "soc_kw",
@@ -818,7 +790,7 @@ def run_car_solar_tests(my_predbat):
         failed |= test_solar_slot_size_follows_surplus(my_predbat)
         failed |= test_solar_slot_capped_by_charger(my_predbat)
         failed |= test_vpp_battery_priority_holds_solar(my_predbat)
-        failed |= test_solar_battery_priority_level(my_predbat)
+        failed |= test_solar_battery_takes_surplus_first(my_predbat)
         failed |= test_away_moves_solar_earlier(my_predbat)
         if failed:
             return failed
