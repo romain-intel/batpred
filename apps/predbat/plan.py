@@ -6037,8 +6037,8 @@ class Plan:
 
         The battery-priority hold assumes the car can catch up later, which stops being true in two cases.
         Mark the afternoon away and the morning becomes the car's last chance, so banking it for a battery
-        that has the whole day to fill is the wrong way round - at a 100% priority level the car would never
-        see a solar window at all. And a one-off deadline means the car needs a level by a time the battery
+        that has the whole day to fill is the wrong way round - with the battery taking surplus first the car
+        would never see a solar window at all. And a one-off deadline means the car needs a level by a time the battery
         has no stake in, so the sun before it should go to the car rather than force a purchase the battery
         then saves itself from.
 
@@ -6111,11 +6111,11 @@ class Plan:
         ready time. Solar is opportunistic: it tops the car up above the guaranteed minimum whenever the
         sun is free, and bounding it by a morning ready time would exclude every daylight hour.
 
-        car_charging_solar_battery_soc decides who gets the surplus first. Below that level the battery
-        takes it and no car window is offered; at or above it the car has first call, which is what
-        happens throughout at the default of 0%. It is the mirror of car_charging_plan_min_soc: that one
-        says how much of the car you will pay for, this one says how much house battery you want banked
-        before the car is worth more than the pack.
+        The house battery gets the surplus first, and the car is offered a window once the pack is predicted
+        full. A kWh in the pack displaces the evening peak; one in a car that has been promised nothing
+        displaces at most a cheap overnight top-up, so the pack is the better home for it. The exceptions are
+        a car that needs the sun more urgently - a one-off deadline, or away time later in the day - and
+        car_solar_reserved_for_car releases exactly what those need before the hold applies.
 
         Args:
         - load_step: house load forecast, built here when the caller has not already done so
@@ -6138,15 +6138,15 @@ class Plan:
         # the pack as the held surplus fills it. Walking it forward means "full enough" is judged at the
         # time of each slot rather than from the SoC right now, so a pack that gets there mid-morning
         # releases the car mid-morning rather than holding all day.
-        # A VPP dispatch pays for what is in the pack when it runs, so it claims surplus up to a full
-        # battery rather than only up to the everyday priority level below.
+        # A VPP dispatch pays for what is in the pack when it runs, so with vpp_battery_priority on the run-up
+        # to it fills the battery ahead of even the car's own claims below - a deadline's shortfall is bought.
         vpp_hold_end = self.car_solar_vpp_hold_end()
         # Surplus the car can only get from the slots it will be present for. The hold below gives up
         # exactly this much, so away time moves the car's charge earlier instead of removing it: the
         # battery still has the rest of the day, the car does not.
         reserved_for_car = self.car_solar_reserved_for_car(load_step)
         given_to_car = 0.0
-        battery_priority_kwh = self.soc_max * min(max(self.car_charging_solar_battery_soc, 0), 100) / 100.0
+        battery_priority_kwh = self.soc_max
         battery_estimate = self.soc_kw
         start_minute = int(self.minutes_now / self.plan_interval_minutes) * self.plan_interval_minutes
         end_minute = self.minutes_now + self.forecast_minutes

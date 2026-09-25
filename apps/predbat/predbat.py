@@ -507,7 +507,6 @@ class PredBat(hass.Hass, Octopus, Energidataservice, Stromligning, Fetch, Plan, 
         # Set by fetch_sensor_data_cars() for cars on Octopus Intelligent dispatch slots (#4967).
         self.car_charging_limit_model = None
         self.car_charging_soc = [0]
-        self.car_charging_solar_battery_soc = 0
         self.vpp_battery_priority = False
         self.car_charging_soc_next = [None]
         self.car_charging_rate = [7.4]
