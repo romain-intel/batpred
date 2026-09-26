@@ -61,6 +61,7 @@ from utils import (
     round_out_to_period,
 )
 from prediction import Prediction
+from tesla_charge_schedule import best_contiguous_block
 from prediction_kernel import kernel_status_summary, set_window_start
 from predbat_metrics import metrics
 import time
@@ -6265,7 +6266,7 @@ class Plan:
         """
         deadlines = [{"minute": ready_minutes, "kwh": min_soc_kwh, "one_off": False}]
         for deadline in self.car_one_off_deadlines(car_n):
-            deadlines.append({"minute": deadline["minute"], "kwh": deadline["kwh"], "one_off": True})
+            deadlines.append({"minute": deadline["minute"], "kwh": deadline["kwh"], "percent": deadline["percent"], "one_off": True})
         deadlines.sort(key=lambda deadline: deadline["minute"])
         return deadlines
 
@@ -6294,6 +6295,37 @@ class Plan:
             order.reverse()
             windows = [windows[window_n] for window_n in order]
         return windows
+
+    def car_grid_block_windows(self, car_n, deadlines, min_soc_kwh, solar_windows):
+        """
+        The purchases a car that buys only up to its minimum will actually make, as import windows
+
+        A Tesla on Charge on Solar grid-charges only inside its schedule window and only below its minimum,
+        contiguously at full rate from the window's start. Scattered cheapest slots are not something it can do,
+        so its purchases are planned as the cheapest contiguous block that reaches the minimum by the earliest
+        deadline still owed anything. The block avoids slots the car is away for, and slots with sun on offer:
+        below the minimum the car would grid-charge there, displacing energy that was free.
+
+        Args:
+        - car_n: which car
+        - deadlines: as from car_deadlines()
+        - min_soc_kwh: the car's minimum, in kWh - the most it will ever buy up to
+        - solar_windows: the solar windows on offer to the car
+
+        Returns:
+        - list: import windows, in time order, empty when nothing is owed
+        """
+        owed = [deadline["minute"] for deadline in deadlines if min(deadline["kwh"], min_soc_kwh) > self.car_charging_soc[car_n] + 0.001]
+        if not owed:
+            return []
+
+        def blocked(start, end):
+            return self.car_slot_is_away(start, end) or any(start < window["end"] and end > window["start"] for window in solar_windows)
+
+        block = best_contiguous_block(self.car_charging_soc[car_n], min_soc_kwh, self.car_charging_rate[car_n], self.car_charging_loss, self.rate_import, self.minutes_now, min(owed), self.plan_interval_minutes, is_blocked=blocked)
+        if not block:
+            return []
+        return [{"start": slot["start"], "end": slot["end"], "average": self.rate_import.get(slot["start"], self.rate_min)} for slot in block["slots"]]
 
     def plan_car_charging(self, car_n, low_rates):
         """
@@ -6350,11 +6382,21 @@ class Plan:
         # it and ignores the price cap, because it is an explicit instruction that the charge is needed.
         # Whatever sun is left then tops the car up towards the limit, whenever it arrives.
         # Entries are (window, target_kwh, end_limit, capped_by_max_price).
+        #
+        # A car that buys only up to its minimum (a Tesla on Charge on Solar) is planned as it will behave: every
+        # purchase is the one contiguous block its schedule window makes it follow, no deadline buys past the
+        # minimum, and the block is not price-capped - the car buys it whatever the cap says.
+        grid_to_min = getattr(self, "car_charging_solar_grid_to_min", False)
+        block_windows = self.car_grid_block_windows(car_n, deadlines, min_soc_kwh, solar_windows) if grid_to_min else []
         candidates = []
         for deadline in deadlines:
             for window in solar_windows:
                 if window["end"] <= deadline["minute"]:
                     candidates.append((window, self.car_charging_limit[car_n], horizon, False))
+            if grid_to_min:
+                for window in block_windows:
+                    candidates.append((window, min(deadline["kwh"], min_soc_kwh), deadline["minute"], False))
+                continue
             purchase = self.car_deadline_purchase_windows(car_n, deadline["minute"]) if deadline["one_off"] else bought_windows
             for window in purchase:
                 candidates.append((window, deadline["kwh"], deadline["minute"], not deadline["one_off"]))
@@ -6454,7 +6496,11 @@ class Plan:
                 continue
             reached = self.car_charging_soc[car_n] + sum(slot["kwh"] * self.car_charging_loss for slot in plan if slot["end"] <= deadline["minute"])
             if reached + 0.1 < deadline["kwh"]:
-                self.log("Warn: Car {} can only reach {}kWh of the {}kWh promised by {} - too few slots the car is present for before then, at its charge rate".format(car_n, dp2(reached), deadline["kwh"], self.time_abs_str(deadline["minute"])))
+                if getattr(self, "car_charging_solar_grid_to_min", False) and deadline["kwh"] > min_soc_kwh + 0.001:
+                    reason = "the car only buys from the grid up to its minimum of {}%, so the rest has to come from the sun - raise the minimum in the car's app to at least {}% to buy it".format(self.car_charging_plan_min_soc, deadline["percent"])
+                else:
+                    reason = "too few slots the car is present for before then, at its charge rate"
+                self.log("Warn: Car {} can only reach {}kWh of the {}kWh promised by {} - {}".format(car_n, dp2(reached), deadline["kwh"], self.time_abs_str(deadline["minute"]), reason))
 
         # Return sorted back in time order
         plan = self.sort_window_by_time(plan)

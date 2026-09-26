@@ -946,6 +946,14 @@ CONFIG_ITEMS = [
         "enable_condition": "num_cars > 0",
     },
     {
+        "name": "car_charging_solar_grid_to_min",
+        "friendly_name": "Car buys from the grid only up to its minimum",
+        "type": "switch",
+        "default": False,
+        "icon": "mdi:car-clock",
+        "enable": "car_charging_solar",
+    },
+    {
         "name": "car_charging_solar_excess",
         "friendly_name": "Car solar charging surplus threshold",
         "type": "input_number",

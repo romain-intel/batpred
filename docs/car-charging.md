@@ -695,6 +695,16 @@ the better home for it. Two things put the car first instead, for exactly as muc
 (**Car ready by** on the plan page), and away time later in the day that leaves the morning as the car's last chance. If your equipment gives
 the car first call regardless, the car's share will be under-predicted while both are charging.
 
+- **switch.predbat_car_charging_solar_grid_to_min** tells Predbat the car only ever buys from the grid up to its minimum, which is how a
+Tesla behaves with Charge on Solar turned on: inside its charge schedule window and below the Charge on Solar minimum it charges at full rate
+from any source, and everywhere else it takes surplus sun only. Keep **car_charging_plan_min_soc** matched to the minimum set in the Tesla app.
+
+    With it on, Predbat plans the car the way it will really behave. Its purchases become one contiguous block, since the car charges
+continuously from the start of its window rather than picking scattered cheap slots, and the block avoids slots where the car is away or
+where sun is on offer - below the minimum the car would buy there instead. No purchase goes past the minimum, so a **Car ready by** level
+above it has to come from the sun; if the forecast sun falls short, Predbat logs a warning saying how far short it will be and what to raise
+the minimum to in the car's app.
+
 - For a one-off level by a particular time - a trip rather than the daily routine - use **Car ready by** from the plan page, described under
 [select.predbat_manual_car_deadline](customisation.md#manual-control). It stacks with the everyday minimum below rather than replacing it.
 

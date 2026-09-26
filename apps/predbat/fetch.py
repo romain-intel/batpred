@@ -2623,6 +2623,7 @@ class Fetch:
         self.car_charging_now_response = [str(response).lower() for response in self.get_arg("car_charging_now_response", ["yes", "on", "enable", "true", "charging"])]
         self.car_charging_from_battery = self.get_arg("car_charging_from_battery")
         self.car_charging_solar = self.get_arg("car_charging_solar")
+        self.car_charging_solar_grid_to_min = self.get_arg("car_charging_solar_grid_to_min")
         self.car_charging_solar_excess = self.get_arg("car_charging_solar_excess")
         self.vpp_battery_priority = self.get_arg("vpp_battery_priority")
         self.car_charging_rate_threshold_export = self.get_arg("car_charging_rate_threshold_export")
