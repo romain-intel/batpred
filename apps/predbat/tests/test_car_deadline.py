@@ -383,6 +383,139 @@ def test_deadline_warns_when_away_leaves_too_little(my_predbat):
     return failed
 
 
+def bought_slots(plan):
+    """Grid slots in the plan, in time order."""
+    return sorted((slot for slot in plan if not slot.get("solar")), key=lambda slot: slot["start"])
+
+
+def is_contiguous(slots):
+    """True when each slot starts where the previous one ended."""
+    return all(later["start"] == earlier["end"] for earlier, later in zip(slots, slots[1:]))
+
+
+def test_grid_to_min_buys_one_block(my_predbat):
+    """A car that buys only up to its minimum is planned as the one contiguous block it will follow.
+
+    A Tesla on Charge on Solar grid-charges contiguously from its schedule window's start. Planning the
+    scattered cheapest slots instead would put load in the forecast at times the car will not draw it.
+    """
+    print("  - test_grid_to_min_buys_one_block")
+    failed = False
+    # 60% of 50kWh = 30kWh minimum, car at 10kWh: 20kWh to buy within eight hours, cheap and dear alternating
+    setup_deadline_car(my_predbat, min_soc=60, ready_ahead=480)
+    windows = [{"start": my_predbat.minutes_now + 30 * n, "end": my_predbat.minutes_now + 30 * (n + 1), "average": 10.0 if n % 2 else 40.0} for n in range(16)]
+    update_rates_import(my_predbat, windows)
+
+    scattered = bought_slots(my_predbat.plan_car_charging(0, windows))
+    if is_contiguous(scattered):
+        print("ERROR: with the switch off the cheapest slots are scattered, so this test proves nothing: {}".format(scattered))
+        return True
+
+    my_predbat.car_charging_solar_grid_to_min = True
+    try:
+        block = bought_slots(my_predbat.plan_car_charging(0, windows))
+    finally:
+        my_predbat.car_charging_solar_grid_to_min = False
+    if not is_contiguous(block):
+        print("ERROR: the car charges contiguously, so its purchases must be one block, got {}".format(block))
+        failed = True
+    if abs(sum(slot["kwh"] for slot in block) - 20.0) > 0.1:
+        print("ERROR: the block should buy the 20kWh to the minimum, got {}".format(sum(slot["kwh"] for slot in block)))
+        failed = True
+    return failed
+
+
+def test_grid_to_min_never_buys_past_the_minimum(my_predbat):
+    """Above its minimum the car takes sun only, so no deadline may buy past it - and the user is told why."""
+    print("  - test_grid_to_min_never_buys_past_the_minimum")
+    failed = False
+    setup_deadline_car(my_predbat, min_soc=60, ready_ahead=480)
+    my_predbat.car_charging_solar_grid_to_min = True
+    deadline = set_deadline(my_predbat, 600, 80)
+
+    messages = []
+    original_log = my_predbat.log
+    my_predbat.log = lambda message, *args, **kwargs: messages.append(message)
+    try:
+        plan = my_predbat.plan_car_charging(0, [])
+    finally:
+        my_predbat.log = original_log
+        my_predbat.car_charging_solar_grid_to_min = False
+
+    bought = sum(slot["kwh"] for slot in plan if not slot.get("solar"))
+    if abs(bought - 20.0) > 0.1:
+        print("ERROR: the car only buys to its 30kWh minimum, so 20kWh at most, got {} from {}".format(bought, plan))
+        failed = True
+    if not any("raise the minimum" in message for message in messages):
+        print("ERROR: a deadline above the minimum should say to raise it in the car's app, logged {}".format(messages))
+        failed = True
+    if bought_by(plan, deadline) > 20.1:
+        print("ERROR: nothing past the minimum may be bought before the deadline either")
+        failed = True
+
+    # Sun before the deadline raises the car first, and the block was sized from the charge before it - so only
+    # the cap stops the block buying its full length on top of the sun and overshooting the minimum
+    setup_deadline_car(my_predbat, min_soc=60, ready_ahead=480)
+    my_predbat.car_charging_solar = True
+    set_pv(my_predbat, 7.0, start_offset=0, length=60)
+    set_deadline(my_predbat, 600, 80)
+    my_predbat.car_charging_solar_grid_to_min = True
+    my_predbat.log = lambda message, *args, **kwargs: None
+    try:
+        plan = my_predbat.plan_car_charging(0, [])
+    finally:
+        my_predbat.log = original_log
+        my_predbat.car_charging_solar_grid_to_min = False
+    sun = sum(slot["kwh"] for slot in plan if slot.get("solar") and slot["end"] <= my_predbat.minutes_now + 480)
+    bought = sum(slot["kwh"] for slot in plan if not slot.get("solar"))
+    if sun <= 0:
+        print("ERROR: expected sun before the ready time, so this case proves nothing: {}".format(plan))
+        failed = True
+    elif 10.0 + sun + bought > 30.0 + 0.1:
+        print("ERROR: sun {} plus purchases {} take the car past its 30kWh minimum on the grid".format(sun, bought))
+        failed = True
+    return failed
+
+
+def test_grid_to_min_block_avoids_sun(my_predbat):
+    """Below its minimum the car would grid-charge over sun inside its window, so the block stays off it."""
+    print("  - test_grid_to_min_block_avoids_sun")
+    failed = False
+    setup_deadline_car(my_predbat, min_soc=60, ready_ahead=600)
+    my_predbat.car_charging_solar = True
+    set_pv(my_predbat, 7.0, start_offset=240, length=120)
+    # Dear before the sun and cheap from it onwards, so the cheapest block would start right on the sun
+    windows = [{"start": my_predbat.minutes_now + 30 * n, "end": my_predbat.minutes_now + 30 * (n + 1), "average": 60.0 if n < 8 else 10.0} for n in range(20)]
+    update_rates_import(my_predbat, windows)
+    my_predbat.car_charging_solar_grid_to_min = True
+    try:
+        plan = my_predbat.plan_car_charging(0, [])
+    finally:
+        my_predbat.car_charging_solar_grid_to_min = False
+    sunny_start, sunny_end = my_predbat.minutes_now + 240, my_predbat.minutes_now + 360
+    over_sun = [slot for slot in bought_slots(plan) if slot["start"] < sunny_end and slot["end"] > sunny_start]
+    if over_sun:
+        print("ERROR: grid charging planned over the sun: {}".format(over_sun))
+        failed = True
+
+    # The plan alone cannot show this - the planner already drops a purchase that overlaps planned sun. The block
+    # is what becomes the car's schedule window, and a window over the sun is where the car would buy instead.
+    ready = my_predbat.minutes_now + 600
+    min_soc_kwh = 30.0
+    deadlines = my_predbat.car_deadlines(0, ready, min_soc_kwh)
+    block = my_predbat.car_grid_block_windows(0, deadlines, min_soc_kwh, my_predbat.plan_car_charging_solar_windows())
+    if not block:
+        print("ERROR: expected a block to be planned")
+        failed = True
+    elif any(slot["start"] < sunny_end and slot["end"] > sunny_start for slot in block):
+        print("ERROR: the block that becomes the car's window covers the sun: {}".format(block))
+        failed = True
+    if not any(slot.get("solar") for slot in plan):
+        print("ERROR: the sun should still be used: {}".format(plan))
+        failed = True
+    return failed
+
+
 def test_deadline_applies_to_the_first_car_only(my_predbat):
     """The level is a percentage of one car's battery, so it is not applied to every car."""
     print("  - test_deadline_applies_to_the_first_car_only")
@@ -536,6 +669,7 @@ def run_car_deadline_tests(my_predbat):
         "car_charging_plan_max_price",
         "car_charging_now",
         "car_charging_solar",
+        "car_charging_solar_grid_to_min",
         "car_charging_solar_excess",
         "car_charging_rate_threshold_export",
         "car_charging_plan_min_soc",
@@ -561,6 +695,9 @@ def run_car_deadline_tests(my_predbat):
         failed |= test_deadline_ready_for_a_trip(my_predbat)
         failed |= test_deadline_does_not_claim_sun_while_away(my_predbat)
         failed |= test_deadline_warns_when_away_leaves_too_little(my_predbat)
+        failed |= test_grid_to_min_buys_one_block(my_predbat)
+        failed |= test_grid_to_min_never_buys_past_the_minimum(my_predbat)
+        failed |= test_grid_to_min_block_avoids_sun(my_predbat)
         failed |= test_deadline_applies_to_the_first_car_only(my_predbat)
         failed |= test_deadline_survives_an_unset_config_value(my_predbat)
         failed |= test_deadline_select_takes_its_own_default(my_predbat)
