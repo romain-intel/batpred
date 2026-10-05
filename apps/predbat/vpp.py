@@ -140,6 +140,49 @@ def fetch_vpp_event(base):
     return result
 
 
+def load_vpp_slot(base, rate_dict, export, rate_replicate=None):
+    """
+    Price the next VPP event into a rate dict (in place), so the plan values what the event will pay for.
+
+    A calendar says when an event is, not what it is worth, so without this the plan treats the event as an
+    ordinary hour and happily spends the battery on the house beforehand. vpp_pence_per_kwh supplies the
+    worth - in the tariff's minor unit, like axle_pence_per_kwh - and is added to both directions for the
+    event window, as Axle and Octopus saving sessions do: exporting earns it, and charging during the event
+    gives up the same amount, which stops the plan counting on filling the battery inside the window.
+
+    What the plan then does beforehand follows from the rest of the configuration: it holds the battery so
+    the event has something to export, filling from solar - and from the grid only where grid charging is
+    allowed, which set_charge_freeze_only rules out for tariffs that forbid exporting grid energy.
+
+    Only the next event is priced - the one fetch_vpp_event() reports. The minutes are marked as a saving
+    session so the price is not replicated into days whose rates are unknown.
+
+    Args:
+    - base: PredBat instance, with vpp_event already fetched for this cycle
+    - rate_dict: import or export rates keyed by absolute plan minute, modified in place
+    - export: True for the export rates, False for import - only used in the log
+    - rate_replicate: optional replication markers to update alongside
+    """
+    try:
+        price = float(base.get_arg("vpp_pence_per_kwh", 0.0) or 0.0)
+    except (ValueError, TypeError):
+        base.log("Warn: vpp_pence_per_kwh is not a number, VPP events are not priced")
+        return
+    event = getattr(base, "vpp_event", None) or {}
+    if not price or event.get("minutes_to_start") is None or event.get("minutes_to_end") is None:
+        return
+
+    start_minute = max(base.minutes_now + event["minutes_to_start"], 0)
+    end_minute = min(base.minutes_now + event["minutes_to_end"], base.minutes_now + base.forecast_minutes)
+    if end_minute <= start_minute:
+        return
+    base.log("Pricing VPP event {} - {} at +{} on {} rates".format(base.time_abs_str(start_minute), base.time_abs_str(end_minute), price, "export" if export else "import"))
+    for minute in range(start_minute, end_minute):
+        rate_dict[minute] = rate_dict.get(minute, 0) + price
+        if rate_replicate is not None:
+            rate_replicate[minute] = "saving"
+
+
 def fetch_vpp_active(base):
     """Is a VPP event running right now?
 

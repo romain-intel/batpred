@@ -40,7 +40,7 @@ from const import (
 from predbat_metrics import metrics
 from futurerate import FutureRate
 from axle import fetch_axle_sessions, load_axle_slot, fetch_axle_active
-from vpp import fetch_vpp_event
+from vpp import fetch_vpp_event, load_vpp_slot
 
 import copy
 
@@ -1250,6 +1250,7 @@ class Fetch:
             self.load_saving_slot(self.octopus_saving_slots, import_rates, export=False, rate_replicate=self.rate_import_replicated)
             self.load_free_slot(self.octopus_free_slots, import_rates, export=False, rate_replicate=self.rate_import_replicated)
             load_axle_slot(self, self.axle_sessions, import_rates, export=False, rate_replicate=self.rate_import_replicated)
+            load_vpp_slot(self, import_rates, export=False, rate_replicate=self.rate_import_replicated)
             import_rates = self.basic_rates(self.get_arg("rates_import_override", [], indirect=False), "rates_import_override", import_rates, self.rate_import_replicated)
             import_rates = self.apply_manual_rates(import_rates, self.manual_import_rates, is_import=True, rate_replicate=self.rate_import_replicated)
             self.rate_scan(import_rates, print=True)
@@ -1272,6 +1273,7 @@ class Fetch:
             if self.rate_export_max > 0:
                 self.load_saving_slot(self.octopus_saving_slots, export_rates, export=True, rate_replicate=self.rate_export_replicated)
             load_axle_slot(self, self.axle_sessions, export_rates, export=True, rate_replicate=self.rate_export_replicated)
+            load_vpp_slot(self, export_rates, export=True, rate_replicate=self.rate_export_replicated)
             export_rates = self.basic_rates(self.get_arg("rates_export_override", [], indirect=False), "rates_export_override", export_rates, self.rate_export_replicated)
             export_rates = self.apply_manual_rates(export_rates, self.manual_export_rates, is_import=False, rate_replicate=self.rate_export_replicated)
             self.rate_scan_export(export_rates, print=True)
