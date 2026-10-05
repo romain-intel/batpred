@@ -76,7 +76,7 @@ from const import (
 from predbat_metrics import metrics
 from futurerate import FutureRate
 from axle import fetch_axle_sessions, load_axle_slot, fetch_axle_active
-from vpp import fetch_vpp_event
+from vpp import fetch_vpp_event, load_vpp_slot
 
 import ast
 import copy
@@ -1896,6 +1896,7 @@ class Fetch:
             self.load_saving_slot(self.octopus_saving_slots, import_rates, export=False, rate_replicate=self.rate_import_replicated)
             self.load_free_slot(self.octopus_free_slots, import_rates, export=False, rate_replicate=self.rate_import_replicated)
             load_axle_slot(self, self.axle_sessions, import_rates, export=False, rate_replicate=self.rate_import_replicated)
+            load_vpp_slot(self, import_rates, export=False, rate_replicate=self.rate_import_replicated)
             # Snapshot which minutes a saving/free/Axle session tagged "saving" here, before
             # basic_rates()/apply_manual_rates() below get a chance to overwrite rate_replicate with
             # their own "increment"/"user" tag on the same minute - a supported combination (an
@@ -1936,6 +1937,7 @@ class Fetch:
             if self.rate_export_max > 0:
                 self.load_saving_slot(self.octopus_saving_slots, export_rates, export=True, rate_replicate=self.rate_export_replicated)
             load_axle_slot(self, self.axle_sessions, export_rates, export=True, rate_replicate=self.rate_export_replicated)
+            load_vpp_slot(self, export_rates, export=True, rate_replicate=self.rate_export_replicated)
             # See the import block's equivalent comment above (GH#5050).
             self.rate_export_saving_minutes = {minute for minute, tag in self.rate_export_replicated.items() if tag == "saving"}
             export_rates, self.rate_export_pre_saving = self.apply_rate_overrides(
