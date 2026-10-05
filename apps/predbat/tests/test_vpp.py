@@ -19,7 +19,7 @@ about timezone handling, which is where a hand-maintained calendar goes wrong.
 
 from datetime import timedelta
 
-from vpp import fetch_vpp_event, fetch_vpp_active
+from vpp import fetch_vpp_active, fetch_vpp_event, load_vpp_slot
 
 
 class FakeBase:
@@ -249,6 +249,141 @@ def test_vpp_timezone_handling(my_predbat):
     return failed
 
 
+class PricingBase:
+    """Stand-in exposing what load_vpp_slot() reads: the clock, the horizon, the event and the price."""
+
+    def __init__(self, minutes_to_start, minutes_to_end, price=None):
+        """An event the given minutes from a noon clock, priced at price when given."""
+        self.minutes_now = 12 * 60
+        self.forecast_minutes = 48 * 60
+        self.args = {} if price is None else {"vpp_pence_per_kwh": price}
+        self.vpp_event = {"active": minutes_to_start is not None and minutes_to_start <= 0, "minutes_to_start": minutes_to_start, "minutes_to_end": minutes_to_end}
+        self.logs = []
+
+    def get_arg(self, name, default=None, indirect=True):
+        """Return an apps.yaml style argument."""
+        return self.args.get(name, default)
+
+    def time_abs_str(self, minute):
+        """Plan minute as text, for the log."""
+        return str(minute)
+
+    def log(self, message, **kwargs):
+        """Capture warnings so tests can assert on them."""
+        self.logs.append(message)
+
+
+def flat(rate):
+    """Three days of a flat rate, keyed by absolute plan minute."""
+    return {minute: rate for minute in range(0, 3 * 24 * 60)}
+
+
+def test_vpp_event_is_priced(my_predbat):
+    """The event window gains vpp_pence_per_kwh on both rates, and nothing outside it changes.
+
+    Both directions, as Axle and Octopus saving sessions do: exporting earns the premium, and charging
+    during the event gives up the same amount, so the plan cannot count on filling up inside the window.
+    """
+    print("  - test_vpp_event_is_priced")
+    failed = False
+    base = PricingBase(120, 240, price=200)
+    export, imported, replicate = flat(5.0), flat(39.0), {}
+    load_vpp_slot(base, export, export=True, rate_replicate=replicate)
+    load_vpp_slot(base, imported, export=False)
+    start, end = base.minutes_now + 120, base.minutes_now + 240
+    if export[start] != 205.0 or export[end - 1] != 205.0:
+        print("ERROR: the event should export at 5 + 200, got {} and {}".format(export[start], export[end - 1]))
+        failed = True
+    if imported[start] != 239.0:
+        print("ERROR: importing during the event should cost 39 + 200, got {}".format(imported[start]))
+        failed = True
+    if export[start - 1] != 5.0 or export[end] != 5.0 or imported[end] != 39.0:
+        print("ERROR: minutes outside the event must be untouched")
+        failed = True
+    if replicate.get(start) != "saving" or start - 1 in replicate:
+        print("ERROR: the event minutes, and only those, should be marked so the price is not replicated")
+        failed = True
+    return failed
+
+
+def test_vpp_price_needs_a_price_and_an_event(my_predbat):
+    """No price configured, or no event known, leaves the rates exactly as they were."""
+    print("  - test_vpp_price_needs_a_price_and_an_event")
+    failed = False
+    for base, why in ((PricingBase(120, 240), "no price"), (PricingBase(None, None, price=200), "no event"), (PricingBase(120, 240, price=0), "a zero price")):
+        rates = flat(5.0)
+        load_vpp_slot(base, rates, export=True)
+        if rates != flat(5.0):
+            print("ERROR: with {} the rates should not change".format(why))
+            failed = True
+    return failed
+
+
+def test_vpp_price_is_clipped(my_predbat):
+    """A running event is priced from midnight-relative zero up, and an event past the horizon is cut at it."""
+    print("  - test_vpp_price_is_clipped")
+    failed = False
+    # Running now: started 30 minutes ago - the rest of it still counts
+    base = PricingBase(-30, 60, price=200)
+    rates = flat(5.0)
+    load_vpp_slot(base, rates, export=True)
+    if rates[base.minutes_now] != 205.0 or rates[base.minutes_now + 59] != 205.0 or rates[base.minutes_now + 60] != 5.0:
+        print("ERROR: a running event should still be priced until it ends")
+        failed = True
+
+    # Ends beyond the forecast: nothing past the horizon is written
+    base = PricingBase(48 * 60 - 60, 48 * 60 + 120, price=200)
+    rates = {}
+    load_vpp_slot(base, rates, export=True)
+    if not rates or max(rates) >= base.minutes_now + base.forecast_minutes:
+        print("ERROR: the event should be cut at the forecast horizon, last minute {}".format(max(rates) if rates else None))
+        failed = True
+    return failed
+
+
+def test_vpp_bad_price_is_ignored(my_predbat):
+    """A price that is not a number is warned about and ignored rather than crashing the rate build."""
+    print("  - test_vpp_bad_price_is_ignored")
+    failed = False
+    base = PricingBase(120, 240, price="two dollars")
+    rates = flat(5.0)
+    try:
+        load_vpp_slot(base, rates, export=True)
+    except Exception as e:
+        print("ERROR: a bad price raised {}: {}".format(type(e).__name__, e))
+        return True
+    if rates != flat(5.0) or not any("vpp_pence_per_kwh" in message for message in base.logs):
+        print("ERROR: a bad price should leave the rates alone and say why, logged {}".format(base.logs))
+        failed = True
+    return failed
+
+
+def test_vpp_price_is_wired_into_the_rates(my_predbat):
+    """Both rate builds call load_vpp_slot, after the event is fetched and before the user's own overrides.
+
+    Reads the source rather than running a full fetch, as the other wiring tests do. Order matters: the user's
+    rates_*_override and manual rates are applied afterwards so they still have the final say.
+    """
+    print("  - test_vpp_price_is_wired_into_the_rates")
+    import os
+
+    failed = False
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fetch = open(os.path.join(here, "fetch.py")).read()
+    for direction, override in (("import_rates, export=False", "rates_import_override"), ("export_rates, export=True", "rates_export_override")):
+        call = "load_vpp_slot(self, {}".format(direction)
+        if call not in fetch:
+            print("ERROR: the {} build never prices the VPP event".format(direction.split(",")[0]))
+            failed = True
+        elif fetch.index(call) > fetch.index('self.get_arg("{}"'.format(override)):
+            print("ERROR: the VPP price must go in before {} so the user's override still wins".format(override))
+            failed = True
+    if fetch.index("def fetch_config_options") < fetch.index("def fetch_sensor_data(") and "self.vpp_event = fetch_vpp_event(self)" not in fetch.split("def fetch_config_options")[1]:
+        print("ERROR: the event has to be fetched in fetch_config_options, before the rates are built")
+        failed = True
+    return failed
+
+
 def run_vpp_tests(my_predbat):
     """Run every VPP event test."""
     print("**** Running VPP event tests ****\n")
@@ -258,4 +393,9 @@ def run_vpp_tests(my_predbat):
     failed |= test_vpp_live_signal(my_predbat)
     failed |= test_vpp_bad_calendar_data(my_predbat)
     failed |= test_vpp_timezone_handling(my_predbat)
+    failed |= test_vpp_event_is_priced(my_predbat)
+    failed |= test_vpp_price_needs_a_price_and_an_event(my_predbat)
+    failed |= test_vpp_price_is_clipped(my_predbat)
+    failed |= test_vpp_bad_price_is_ignored(my_predbat)
+    failed |= test_vpp_price_is_wired_into_the_rates(my_predbat)
     return failed

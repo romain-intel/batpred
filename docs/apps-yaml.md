@@ -2047,6 +2047,7 @@ These are described in detail in [Energy Rates](energy-rates.md) and are listed 
 - **vpp_control** - Optional, whether to switch Predbat to read-only mode during a generic (non-Axle) VPP event (default: false)
 - **vpp_calendar** - Optional, a Home Assistant calendar entity holding your VPP event windows, e.g. `calendar.vpp_events`
 - **vpp_active** - Optional, an entity that reads `on` while a VPP event is running, e.g. a Tesla `grid_services_active` sensor
+- **vpp_pence_per_kwh** - Optional, what each kWh exported during a calendar VPP event is worth, added to both the export and import rates for the event window so Predbat plans around it (default: unset, events are not priced)
 - **kraken_provider** - Defines whether you are an EDF or Eon.Next customer
 - **kraken_account_id** - Kraken account id (EDF or Eon.Next customers only)
 - **kraken_export_account_id** - Separate export account id (if required) for Kraken
@@ -2906,6 +2907,7 @@ entity holding the windows, which you can fill in by hand or from whatever autom
   vpp_control: true
   vpp_calendar: calendar.vpp_events
   vpp_active: binary_sensor.my_battery_grid_services_active   # optional
+  vpp_pence_per_kwh: 200                                       # optional, what the event pays per kWh
 ```
 
 While an event is running Predbat switches to read-only and writes nothing to the inverter, because during a
@@ -2915,6 +2917,17 @@ already takes for Axle events via **axle_control**.
 
 **vpp_active** is for programmes that publish a live "an event is running" flag. It is optional and can be used
 on its own, but it gives no advance notice, so a calendar is what lets you see the next window coming.
+
+**vpp_pence_per_kwh** tells Predbat what an event is worth, since a calendar only says when it is. It is in your
+tariff's minor unit (pence, cents) like **axle_pence_per_kwh**, and is added to both the export and the import rate
+for the event window, as Axle and Octopus saving sessions are: exporting during the event earns it, and charging
+during the event gives up the same amount. Without it the plan treats the event as an ordinary hour and may spend
+the battery on the house beforehand; with it, Predbat holds the battery so the event has something to export.
+How it fills the battery beforehand follows from your other settings - from solar always, and from the grid only
+where grid charging is allowed. If your tariff forbids exporting grid energy from the battery, keep
+**switch.predbat_set_charge_freeze_only** on and the event will be met from solar alone. Only the next event is
+priced, and if you set **vpp_control** Predbat still stands down during the event itself, leaving the programme in
+control of the export.
 
 Calendar times are read from the entity's `start_time` and `end_time` attributes. Home Assistant writes these as
 naive local time, and Predbat localises them against your configured **timezone** - so make sure that is set
