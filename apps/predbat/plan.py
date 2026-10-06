@@ -6767,7 +6767,7 @@ class Plan:
         daylight leading up to it counts as well as the event itself.
 
         None when the flag is off, no event is known, or the event has already finished, all of which
-        leave the car's normal first call on the surplus untouched.
+        leave the everyday rules in place - the battery first, with the car's own claims released ahead of it.
 
         Returns:
         - int: absolute minute the hold can run to, or None for no hold
@@ -6785,6 +6785,23 @@ class Plan:
         if minutes_to_end <= 0:
             return None
         return self.minutes_now + minutes_to_end
+
+    def car_slot_has_sun(self, start, end, load_step):
+        """
+        Whether forecast solar exceeds the house load anywhere in a slot
+
+        A car charging in such a slot is load the inverter feeds from that surplus before it charges the
+        battery, so even a slot Predbat buys from the grid takes the battery's sun.
+
+        Args:
+        - start, end: absolute plan minutes
+        - load_step: house load forecast, as for car_solar_surplus_kwh()
+
+        Returns:
+        - bool: True when there is surplus to lose
+        """
+        start = max(start, self.minutes_now)
+        return end > start and self.car_solar_surplus_kwh(start, end, load_step) > 0.05
 
     def car_solar_reserved_for_car(self, load_step, car_n=0):
         """
@@ -7073,8 +7090,14 @@ class Plan:
         if not owed:
             return []
 
+        vpp_hold_end = self.car_solar_vpp_hold_end()
+        load_step = self.car_solar_load_forecast() if vpp_hold_end is not None else {}
+
         def blocked(start, end):
-            return self.car_slot_is_away(start, end) or any(start < window["end"] and end > window["start"] for window in solar_windows)
+            if self.car_slot_is_away(start, end) or any(start < window["end"] and end > window["start"] for window in solar_windows):
+                return True
+            # Ahead of a VPP event the sun is the battery's, so grid charging there would take it
+            return vpp_hold_end is not None and start < vpp_hold_end and self.car_slot_has_sun(start, end, load_step)
 
         block = best_contiguous_block(self.car_charging_soc[car_n], min_soc_kwh, self.car_charging_rate[car_n], self.car_charging_loss, self.rate_import, self.minutes_now, min(owed), self.plan_interval_minutes, is_blocked=blocked)
         if not block:
@@ -7115,9 +7138,26 @@ class Plan:
         # the price pass below only has to cover whatever solar cannot deliver. The house load forecast is
         # built once and handed down rather than rebuilt per window - step_data_history walks every
         # previous day for every bucket and is far too expensive to call inside the loop.
-        load_step = self.car_solar_load_forecast() if self.car_charging_solar else {}
+        vpp_hold_end = self.car_solar_vpp_hold_end()
+        load_step = self.car_solar_load_forecast() if (self.car_charging_solar or vpp_hold_end is not None) else {}
         solar_windows = self.plan_car_charging_solar_windows(load_step)
         bought_windows = [low_rates[window_n] for window_n in price_sorted]
+
+        # A car charging while the sun is up is load the inverter feeds from the surplus before it charges the
+        # battery, so a "bought" slot in the sun takes the battery's solar too. With equal import prices that makes
+        # a sunny slot the worse choice - reported from a live system buying at 14:00 in full sun when midnight cost
+        # the same - so among equally priced slots the sunless ones go first. Only reorders ties, so it cannot make
+        # a plan dearer. Ahead of a VPP event with vpp_battery_priority on, sunny slots are not bought at all: the
+        # battery is filling for an event that pays far more for that sun. A one-off deadline's own purchases are
+        # exempt - they are an explicit instruction - and are built separately below.
+        if load_step and self.car_charging_plan_smart[car_n]:
+            sunny = {id(window): self.car_slot_has_sun(window["start"], window["end"], load_step) for window in bought_windows}
+            bought_windows.sort(key=lambda window: (window["average"], sunny[id(window)]))
+        if vpp_hold_end is not None:
+            kept = [window for window in bought_windows if not (window["start"] < vpp_hold_end and self.car_slot_has_sun(window["start"], window["end"], load_step))]
+            if len(kept) < len(bought_windows):
+                self.log("Car {}: {} sunny slot(s) before the VPP event ends left to the battery".format(car_n, len(bought_windows) - len(kept)))
+            bought_windows = kept
 
         # Energy that must be there by the ready time, whatever the weather. Bought slots stop here;
         # solar carries on to the full limit, which is how "minimum from any source, the rest from sun"

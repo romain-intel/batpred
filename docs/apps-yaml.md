@@ -3282,6 +3282,12 @@ where grid charging is allowed. If your tariff forbids exporting grid energy fro
 priced, and if you set **vpp_control** Predbat still stands down during the event itself, leaving the programme in
 control of the export.
 
+**switch.predbat_vpp_battery_priority** gives the battery the sun ahead of an event, ahead of the car. Until the event
+ends, solar the battery can still absorb is not offered to the car, and the car is not charged from the grid in any slot
+with solar to spare either: a charging car is load your inverter feeds from that surplus before it charges the battery,
+so a grid slot in the sun takes the battery's solar just the same. The car's charge moves to sunless slots instead. A
+**Car ready by** level you have set yourself is still bought on time, as an explicit instruction.
+
 Calendar times are read from the entity's `start_time` and `end_time` attributes. Home Assistant writes these as
 naive local time, and Predbat localises them against your configured **timezone** - so make sure that is set
 correctly, or events will be acted on at the wrong hour.

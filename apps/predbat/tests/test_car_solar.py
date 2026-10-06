@@ -477,6 +477,97 @@ def test_vpp_battery_priority_holds_solar(my_predbat):
     return failed
 
 
+def bought_starts(plan):
+    """Offsets from now of the grid slots in a car plan."""
+    return [slot["start"] for slot in plan if not slot.get("solar")]
+
+
+def test_bought_slots_prefer_no_sun(my_predbat):
+    """Among equally priced grid slots the car takes the sunless ones: in the sun it would eat the battery's solar.
+
+    Reported from a live system: off-peak cost the same at 14:00 as at midnight, ties went to the earliest slot,
+    and the car charged at 14:00 in full sun - load the inverter fed from the surplus before the battery.
+    """
+    print("  - test_bought_slots_prefer_no_sun")
+    failed = False
+    setup_car(my_predbat, car_kwh=3.5, ready_ahead=1200, rate=7.0, house_kw=1.0)
+    reset_rates(my_predbat, 34.0, 5.0)
+    # Solar windows stay closed (export pays more than the threshold), so only the grid ordering is under test
+    my_predbat.car_charging_rate_threshold_export = 1
+    set_pv(my_predbat, 7.0, start_offset=0, length=240)
+    low_rates = [{"start": my_predbat.minutes_now + 30 * n, "end": my_predbat.minutes_now + 30 * (n + 1), "average": 34.0} for n in range(30)]
+    sun_end = my_predbat.minutes_now + 240
+
+    # Without solar car charging nothing changes: the tie still goes to the earliest slot, in the sun
+    plain = bought_starts(my_predbat.plan_car_charging(0, low_rates))
+    if not plain or plain[0] >= sun_end:
+        print("ERROR: with solar car charging off the earliest (sunny) slot should still win, so this test proves nothing: {}".format(plain))
+        return True
+
+    my_predbat.car_charging_solar = True
+    starts = bought_starts(my_predbat.plan_car_charging(0, low_rates))
+    my_predbat.car_charging_solar = False
+    if not starts or any(start < sun_end for start in starts):
+        print("ERROR: at the same price the car should charge after the sun, got starts {} with sun until {}".format(starts, sun_end))
+        failed = True
+    return failed
+
+
+def test_vpp_run_up_buys_no_sun(my_predbat):
+    """Ahead of a VPP event with battery priority on, the car is not charged in the sun at all - even when cheaper.
+
+    The battery is filling for an event that pays far more for that sun than a cheaper car slot saves. A one-off
+    deadline still gets what it needs, as an explicit instruction, and the contiguous Tesla block stays out too.
+    """
+    print("  - test_vpp_run_up_buys_no_sun")
+    failed = False
+    setup_car(my_predbat, car_kwh=3.5, ready_ahead=1200, rate=7.0, house_kw=1.0)
+    reset_rates(my_predbat, 34.0, 5.0)
+    my_predbat.car_charging_rate_threshold_export = 1
+    set_pv(my_predbat, 7.0, start_offset=0, length=240)
+    sun_end = my_predbat.minutes_now + 240
+    # The sunny slots are the cheap ones, so price alone would put the car in the sun
+    low_rates = [{"start": my_predbat.minutes_now + 30 * n, "end": my_predbat.minutes_now + 30 * (n + 1), "average": 20.0 if n < 8 else 34.0} for n in range(30)]
+    update_rates_import(my_predbat, low_rates)
+    set_vpp_event(my_predbat, minutes_to_end=480)
+
+    try:
+        my_predbat.vpp_battery_priority = False
+        cheap = bought_starts(my_predbat.plan_car_charging(0, low_rates))
+        if not cheap or cheap[0] >= sun_end:
+            print("ERROR: without battery priority the cheaper sunny slot should win, so this test proves nothing: {}".format(cheap))
+            return True
+
+        my_predbat.vpp_battery_priority = True
+        starts = bought_starts(my_predbat.plan_car_charging(0, low_rates))
+        if not starts or any(start < sun_end for start in starts):
+            print("ERROR: ahead of the event the car must not charge in the sun, got starts {} with sun until {}".format(starts, sun_end))
+            failed = True
+
+        # The contiguous block a Tesla follows stays out of the sun as well
+        my_predbat.car_charging_solar_grid_to_min = True
+        my_predbat.car_charging_plan_min_soc = 100
+        block = bought_starts(my_predbat.plan_car_charging(0, low_rates))
+        my_predbat.car_charging_solar_grid_to_min = False
+        if any(start < sun_end for start in block):
+            print("ERROR: the Tesla block must not sit in the sun ahead of the event, got starts {}".format(block))
+            failed = True
+
+        # A one-off deadline inside the sunny hours still buys what it needs
+        deadline = int((my_predbat.minutes_now + 120) / my_predbat.plan_interval_minutes) * my_predbat.plan_interval_minutes
+        my_predbat.manual_car_deadline_keep = {minute: 50 for minute in range(deadline, deadline + my_predbat.plan_interval_minutes)}
+        my_predbat.car_charging_limit = [25.0]
+        promised = [slot for slot in my_predbat.plan_car_charging(0, low_rates) if not slot.get("solar") and slot["end"] <= deadline]
+        if not promised:
+            print("ERROR: a one-off deadline in the sunny hours should still be bought before it")
+            failed = True
+    finally:
+        my_predbat.manual_car_deadline_keep = {}
+        my_predbat.vpp_battery_priority = False
+        my_predbat.vpp_event = {"active": False, "start": None, "end": None, "message": "", "minutes_to_start": None, "minutes_to_end": None}
+    return failed
+
+
 def test_solar_battery_takes_surplus_first(my_predbat):
     """The house battery gets surplus solar first; the car is offered windows once it is predicted full.
 
@@ -764,6 +855,7 @@ def run_car_solar_tests(my_predbat):
         "car_charging_now",
         "car_charging_solar",
         "car_charging_solar_excess",
+        "car_charging_solar_grid_to_min",
         "manual_car_away_times",
         "vpp_event",
         "vpp_battery_priority",
@@ -791,6 +883,8 @@ def run_car_solar_tests(my_predbat):
         failed |= test_solar_slot_capped_by_charger(my_predbat)
         failed |= test_vpp_battery_priority_holds_solar(my_predbat)
         failed |= test_solar_battery_takes_surplus_first(my_predbat)
+        failed |= test_bought_slots_prefer_no_sun(my_predbat)
+        failed |= test_vpp_run_up_buys_no_sun(my_predbat)
         failed |= test_away_moves_solar_earlier(my_predbat)
         if failed:
             return failed
