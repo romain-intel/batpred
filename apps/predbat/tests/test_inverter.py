@@ -2708,6 +2708,56 @@ def test_charge_target_overshoot_hold(my_predbat, ha, inv, dummy_items):
     return failed
 
 
+def test_freeze_service_target_rounded_down(my_predbat, ha, inv, dummy_items):
+    """
+    On an inverter that charges from the grid to reach a reserve above its SoC, a freeze service never gets a target
+    above the live SoC rounded down, as a hook writing it as the reserve would import the difference every cycle.
+    """
+    failed = False
+    original_args = dict(my_predbat.args)
+    original = (inv.soc_percent, inv.soc_kw, inv.soc_max, inv.inv_has_target_soc, inv.inv_has_solis_energy_control, inv.inv_reserve_above_soc_charges_from_grid)
+    original_rate = dummy_items["number.charge_rate"]
+    # (name, charges towards reserve, target, freeze, expected service, expected target)
+    cases = [
+        ("explicit_freeze_rounds_down", True, 59, True, "charge_freeze", 58),
+        ("at_target_rounds_down", True, 59, False, "charge_freeze", 58),
+        ("overshoot_below_soc_unchanged", True, 57, False, "charge_freeze", 57),
+        ("charge_above_soc_unchanged", True, 70, False, "charge_start", 70),
+        ("passive_reserve_inverter_unchanged", False, 59, True, "charge_freeze", 59),
+    ]
+    try:
+        my_predbat.args.update({"charge_start_service": "charge_start", "charge_stop_service": "charge_stop", "charge_freeze_service": "charge_freeze", "discharge_stop_service": "discharge_stop", "charge_rate": "number.charge_rate", "device_id": "DID0"})
+        my_predbat.args.pop("charge_rate_percent", None)
+        dummy_items["number.charge_rate"] = 1101
+        # 58.6% live, which calc_percent_limit reports as 59%
+        inv.soc_max = 10.0
+        inv.soc_kw = 5.86
+        inv.soc_percent = 59
+        inv.inv_has_target_soc = False
+        inv.inv_has_solis_energy_control = False
+        ha.service_store_enable = True
+        for name, charges_towards_reserve, target, freeze, expected_service, expected_target in cases:
+            print("**** Running Test: freeze_service_target_{} ****".format(name))
+            inv.inv_reserve_above_soc_charges_from_grid = charges_towards_reserve
+            my_predbat.last_service_hash.pop("charge", None)
+            my_predbat.last_service_hash.pop("discharge", None)
+            ha.service_store = []
+            inv.adjust_charge_immediate(target, freeze=freeze)
+            expected = [["discharge_stop", {"device_id": "DID0"}], [expected_service, {"device_id": "DID0", "target_soc": expected_target, "power": 1101}]]
+            result = ha.get_service_store()
+            if result != expected:
+                print("ERROR: freeze service target {} expected {} got {}".format(name, expected, result))
+                failed = True
+    finally:
+        my_predbat.args = original_args
+        inv.soc_percent, inv.soc_kw, inv.soc_max, inv.inv_has_target_soc, inv.inv_has_solis_energy_control, inv.inv_reserve_above_soc_charges_from_grid = original
+        dummy_items["number.charge_rate"] = original_rate
+        ha.service_store_enable = False
+        my_predbat.last_service_hash.pop("charge", None)
+        my_predbat.last_service_hash.pop("discharge", None)
+    return failed
+
+
 def test_call_adjust_export_immediate(test_name, my_predbat, ha, inv, dummy_items, soc, repeat=False, freeze=False, clear=False, charge_stop=False, discharge_start_time="00:00:00", discharge_end_time="23:55:00", no_freeze=False):
     """
     Tests;
@@ -6870,6 +6920,7 @@ charge_start_service:
         return failed
 
     failed |= test_charge_target_overshoot_hold(my_predbat, ha, inv, dummy_items)
+    failed |= test_freeze_service_target_rounded_down(my_predbat, ha, inv, dummy_items)
     if failed:
         return failed
 

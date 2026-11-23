@@ -3471,6 +3471,17 @@ class Inverter(BatteryCurve):
                 "power": int(current_rate),
             }
 
+            # A freeze service holds the battery where it is, and on an inverter that charges from the grid to reach a
+            # reserve above its SoC a hook that writes target_soc as the reserve would turn the hold into an import.
+            # The target arrives as the SoC rounded to nearest (calc_percent_limit), so cap it at the live SoC rounded
+            # down, as hold_reserve_percent() does for the reserve Predbat writes itself - otherwise each cycle asks
+            # for a percent more than the battery holds and the hold ratchets up from the grid.
+            freeze_service_data = service_data
+            if self.inv_reserve_above_soc_charges_from_grid and self.soc_max > 0:
+                live_percent = int(self.soc_kw / self.soc_max * 100.0)
+                if service_data["target_soc"] > live_percent:
+                    freeze_service_data = dict(service_data, target_soc=live_percent)
+
             # Stop discharge
             if not self.call_service_template("discharge_stop_service", service_data_stop, domain="discharge"):
                 self.call_service_template("charge_stop_service", service_data_stop, domain="discharge")
@@ -3484,16 +3495,16 @@ class Inverter(BatteryCurve):
                 # a genuine hold. Falling back to charge_start_service instead issued a fresh active
                 # charge command, which some inverters briefly ramp to full power every cycle,
                 # producing repeated short full-rate import bursts (batpred#4424/#4432).
-                if not self.call_service_template("charge_freeze_service", service_data, domain="charge", extra_data=extra_data):
+                if not self.call_service_template("charge_freeze_service", freeze_service_data, domain="charge", extra_data=extra_data):
                     self.call_service_template("charge_stop_service", service_data_stop, domain="charge")
             elif target_soc == self.soc_percent:
-                if not self.call_service_template("charge_freeze_service", service_data, domain="charge", extra_data=extra_data):
+                if not self.call_service_template("charge_freeze_service", freeze_service_data, domain="charge", extra_data=extra_data):
                     self.call_service_template("charge_start_service", service_data, domain="charge", extra_data=extra_data)
             elif not self.inv_has_target_soc and target_soc < self.soc_percent:
                 # Software-controlled charging can overshoot between updates. Hold with the
                 # configured freeze service, as at equality, instead of resuming house discharge.
                 # Without a freeze service, preserve the existing stop fallback.
-                if not self.call_service_template("charge_freeze_service", service_data, domain="charge", extra_data=extra_data):
+                if not self.call_service_template("charge_freeze_service", freeze_service_data, domain="charge", extra_data=extra_data):
                     self.call_service_template("charge_stop_service", service_data_stop, domain="charge")
             else:
                 self.call_service_template("charge_start_service", service_data, domain="charge", extra_data=extra_data)
